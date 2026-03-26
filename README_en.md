@@ -64,6 +64,8 @@ At minimum, change these:
 - `NAPCAT_BASE_URL`
 - `NAPCAT_PRIVATE_QQ` or `NAPCAT_GROUP_QQ`
 
+Note: these target fields now work directly through the `docker-compose.yml` environment block; no extra CLI target arguments are required.
+
 Then start it:
 
 ```bash

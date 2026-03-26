@@ -42,6 +42,8 @@ environment:
 - `NAPCAT_BASE_URL`
 - `NAPCAT_PRIVATE_QQ` 或 `NAPCAT_GROUP_QQ`
 
+注意：这两个目标字段现在可以直接通过 `docker-compose.yml` 的环境变量生效，不需要额外再传命令行参数。
+
 然后启动：
 
 ```bash

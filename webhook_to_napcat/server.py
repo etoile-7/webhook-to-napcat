@@ -268,11 +268,10 @@ def parse_args() -> Config:
     ap.add_argument("--napcat-token", default=os.getenv("NAPCAT_TOKEN", ""))
     ap.add_argument("--napcat-token-mode", choices=["header", "query"], default=os.getenv("NAPCAT_TOKEN_MODE", "header"))
 
-    target = ap.add_mutually_exclusive_group(required=True)
     private_env = os.getenv("NAPCAT_PRIVATE_QQ")
     group_env = os.getenv("NAPCAT_GROUP_QQ")
-    target.add_argument("--private", type=int, default=int(private_env) if private_env else None)
-    target.add_argument("--group", type=int, default=int(group_env) if group_env else None)
+    ap.add_argument("--private", type=int, default=None, help="QQ 私聊 user_id；也可通过环境变量 NAPCAT_PRIVATE_QQ 提供")
+    ap.add_argument("--group", type=int, default=None, help="QQ 群 group_id；也可通过环境变量 NAPCAT_GROUP_QQ 提供")
 
     ap.add_argument("--timeout", type=float, default=float(os.getenv("NAPCAT_TIMEOUT", "10")))
     ap.add_argument("--retries", type=int, default=int(os.getenv("NAPCAT_RETRIES", "5")))
@@ -280,6 +279,14 @@ def parse_args() -> Config:
     ap.add_argument("--title-prefix", default=os.getenv("TITLE_PREFIX", "📨"))
     ap.add_argument("--include-headers", action="store_true", default=os.getenv("INCLUDE_HEADERS", "1") not in {"0", "false", "False"})
     args = ap.parse_args()
+
+    private_target = args.private if args.private is not None else (int(private_env) if private_env else None)
+    group_target = args.group if args.group is not None else (int(group_env) if group_env else None)
+
+    if private_target is not None and group_target is not None:
+        ap.error("请只设置一个目标：--private / NAPCAT_PRIVATE_QQ 与 --group / NAPCAT_GROUP_QQ 二选一，不要同时填写")
+    if private_target is None and group_target is None:
+        ap.error("必须设置一个目标：请提供 --private 或 --group，或设置环境变量 NAPCAT_PRIVATE_QQ / NAPCAT_GROUP_QQ（私聊和群聊二选一）")
 
     path = args.path.strip() or "/webhook"
     if not path.startswith("/"):
@@ -293,8 +300,8 @@ def parse_args() -> Config:
         napcat_base_url=args.napcat_base_url,
         napcat_token=args.napcat_token,
         napcat_token_mode=args.napcat_token_mode,
-        private=args.private,
-        group=args.group,
+        private=private_target,
+        group=group_target,
         timeout=args.timeout,
         retries=args.retries,
         chunk_size=max(50, args.chunk_size),
