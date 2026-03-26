@@ -6,22 +6,54 @@ services:
     container_name: webhook-to-napcat
     pull_policy: always
     restart: unless-stopped
+
+    # Expose the webhook service on the host
     ports:
       - "8787:8787"
+
     environment:
+      # Webhook server listen address inside the container
       LISTEN_HOST: "0.0.0.0"
+
+      # Host port is mapped above; this is the container-side listen port
       LISTEN_PORT: "8787"
+
+      # Webhook path, e.g. POST http://your-host:8787/webhook
       WEBHOOK_PATH: "/webhook"
+
+      # Optional webhook secret. Leave empty to disable verification.
       WEBHOOK_SECRET: ""
+
+      # NapCat OneBot v11 HTTP API base URL
+      # If NapCat runs on the Docker host, keep host.docker.internal.
+      # If not, replace with the real host/IP and port.
       NAPCAT_BASE_URL: "http://host.docker.internal:3001"
+
+      # Optional NapCat token. Leave empty if auth is disabled.
       NAPCAT_TOKEN: ""
+
+      # Token transport mode: header or query
       NAPCAT_TOKEN_MODE: "header"
+
+      # Set ONE target only:
+      # - private chat: fill NAPCAT_PRIVATE_QQ
+      # - group chat:   fill NAPCAT_GROUP_QQ
       NAPCAT_PRIVATE_QQ: "YOUR_QQ_NUMBER"
       NAPCAT_GROUP_QQ: ""
+
+      # HTTP timeout / retries when calling NapCat
       NAPCAT_TIMEOUT: "10"
       NAPCAT_RETRIES: "5"
+
+      # Max QQ message chunk size for long texts
       QQ_CHUNK_SIZE: "280"
+
+      # Prefix shown in forwarded QQ messages
       TITLE_PREFIX: "📨"
+
+      # Whether to include selected incoming header info in forwarded messages
       INCLUDE_HEADERS: "1"
+
     extra_hosts:
+      # Lets the container reach services running on the Docker host
       - "host.docker.internal:host-gateway"
