@@ -21,7 +21,7 @@
 ### 方式 1：直接本地运行
 
 ```bash
-git clone https://github.com/<your-github-user-or-org>/webhook-to-napcat.git
+git clone https://github.com/etoile-7/webhook-to-napcat.git
 cd webhook-to-napcat
 python3 -m webhook_to_napcat --help
 ```
@@ -255,7 +255,7 @@ sudo systemctl reload caddy
 默认镜像名：
 
 ```text
-ghcr.io/<your-github-user-or-org>/webhook-to-napcat
+ghcr.io/etoile-7/webhook-to-napcat
 ```
 
 如果你需要，可以自行修改 workflow 里的镜像路径。

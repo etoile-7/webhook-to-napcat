@@ -28,9 +28,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/yourname/webhook-to-napcat"
-Repository = "https://github.com/yourname/webhook-to-napcat"
-Issues = "https://github.com/yourname/webhook-to-napcat/issues"
+Homepage = "https://github.com/etoile-7/webhook-to-napcat"
+Repository = "https://github.com/etoile-7/webhook-to-napcat"
+Issues = "https://github.com/etoile-7/webhook-to-napcat/issues"
 
 [project.scripts]
 webhook-to-napcat = "webhook_to_napcat.server:main"

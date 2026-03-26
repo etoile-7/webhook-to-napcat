@@ -19,7 +19,7 @@ A tiny Python project for people who want "something happened on my server / CI 
 ### Option 1: local run
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/etoile-7/webhook-to-napcat.git
 cd webhook-to-napcat
 python3 -m webhook_to_napcat --help
 ```
@@ -250,7 +250,7 @@ What it does:
 Expected image name:
 
 ```text
-ghcr.io/<your-github-user-or-org>/webhook-to-napcat
+ghcr.io/etoile-7/webhook-to-napcat
 ```
 
 If needed, change the image path in the workflow file.
