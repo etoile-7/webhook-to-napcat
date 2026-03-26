@@ -7,53 +7,54 @@ services:
     pull_policy: always
     restart: unless-stopped
 
-    # Expose the webhook service on the host
+    # 将 webhook 服务端口暴露到宿主机
     ports:
       - "8787:8787"
 
     environment:
-      # Webhook server listen address inside the container
+      # 容器内 webhook 服务监听地址
       LISTEN_HOST: "0.0.0.0"
 
-      # Host port is mapped above; this is the container-side listen port
+      # 容器内 webhook 服务监听端口
+      # 上面的 ports 会把宿主机 8787 映射到这里
       LISTEN_PORT: "8787"
 
-      # Webhook path, e.g. POST http://your-host:8787/webhook
+      # webhook 路径，例如：http://你的主机:8787/webhook
       WEBHOOK_PATH: "/webhook"
 
-      # Optional webhook secret. Leave empty to disable verification.
+      # 可选的 webhook 密钥；留空表示不启用校验
       WEBHOOK_SECRET: ""
 
-      # NapCat OneBot v11 HTTP API base URL
-      # If NapCat runs on the Docker host, keep host.docker.internal.
-      # If not, replace with the real host/IP and port.
+      # NapCat OneBot v11 HTTP API 地址
+      # 如果 NapCat 跑在宿主机上，一般保留 host.docker.internal 即可
+      # 如果不是，请改成真实的主机/IP 和端口
       NAPCAT_BASE_URL: "http://host.docker.internal:3001"
 
-      # Optional NapCat token. Leave empty if auth is disabled.
+      # 可选的 NapCat token；如果没开鉴权就留空
       NAPCAT_TOKEN: ""
 
-      # Token transport mode: header or query
+      # token 传递方式：header 或 query
       NAPCAT_TOKEN_MODE: "header"
 
-      # Set ONE target only:
-      # - private chat: fill NAPCAT_PRIVATE_QQ
-      # - group chat:   fill NAPCAT_GROUP_QQ
+      # 私聊和群聊二选一：
+      # - 私聊：填写 NAPCAT_PRIVATE_QQ
+      # - 群聊：填写 NAPCAT_GROUP_QQ
       NAPCAT_PRIVATE_QQ: "YOUR_QQ_NUMBER"
       NAPCAT_GROUP_QQ: ""
 
-      # HTTP timeout / retries when calling NapCat
+      # 调用 NapCat HTTP API 时的超时和重试次数
       NAPCAT_TIMEOUT: "10"
       NAPCAT_RETRIES: "5"
 
-      # Max QQ message chunk size for long texts
+      # 长消息拆分时，单条 QQ 消息的最大长度
       QQ_CHUNK_SIZE: "280"
 
-      # Prefix shown in forwarded QQ messages
+      # 转发到 QQ 时显示的标题前缀
       TITLE_PREFIX: "📨"
 
-      # Whether to include selected incoming header info in forwarded messages
+      # 是否在转发消息中附带部分请求头信息
       INCLUDE_HEADERS: "1"
 
     extra_hosts:
-      # Lets the container reach services running on the Docker host
+      # 让容器可以访问宿主机上运行的服务
       - "host.docker.internal:host-gateway"
