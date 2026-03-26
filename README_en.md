@@ -1,183 +1,39 @@
 # webhook-to-napcat
 
-Receive webhook HTTP requests and forward them to QQ through NapCat (OneBot v11).
+[中文说明](./README.md) | English
 
-A tiny Python project for people who want "something happened on my server / CI / app" → "send it to QQ" with almost zero dependencies.
+Receive HTTP webhooks and forward them to QQ through NapCat (OneBot v11).
+
+A tiny Python project for turning server events, CI notifications, app callbacks, or custom webhooks into QQ messages.
 
 ## Features
 
-- Listen on a configurable host / port / path
-- Accept `application/json`, `application/x-www-form-urlencoded`, and `text/plain`
-- Forward to QQ private chat or group via NapCat HTTP API
+- Configurable host / port / path
+- Accepts `application/json`, `application/x-www-form-urlencoded`, and `text/plain`
+- Forwards to QQ private chat or group chat
 - Optional shared-secret verification
 - QQ-friendly long-message splitting
-- Retry with exponential backoff on transient NapCat failures
-- Pure Python stdlib, no third-party runtime dependencies
+- Retry with exponential backoff for NapCat requests
+- Prebuilt GHCR image for direct deployment
 
-## Install
-
-### Option 1: local run
+## Get the project
 
 ```bash
 git clone https://github.com/etoile-7/webhook-to-napcat.git
 cd webhook-to-napcat
-python3 -m webhook_to_napcat --help
 ```
 
-### Option 2: editable install
+## Quick deployment
 
-```bash
-python3 -m pip install -e .
-webhook-to-napcat --help
+### Option 1: Docker Compose (recommended)
+
+The included `docker-compose.yml` pulls the GHCR image by default:
+
+```text
+ghcr.io/etoile-7/webhook-to-napcat:latest
 ```
 
-## Quick start
-
-Forward webhook messages to a QQ private chat:
-
-```bash
-python3 -m webhook_to_napcat \
-  --listen-port 8787 \
-  --path /webhook \
-  --napcat-base-url http://127.0.0.1:3001 \
-  --private YOUR_QQ_NUMBER
-```
-
-Forward to a QQ group:
-
-```bash
-python3 -m webhook_to_napcat \
-  --listen-port 8787 \
-  --path /webhook \
-  --napcat-base-url http://127.0.0.1:3001 \
-  --group 123456789
-```
-
-Test it:
-
-```bash
-curl -X POST 'http://127.0.0.1:8787/webhook' \
-  -H 'Content-Type: application/json' \
-  -d '{"event":"deploy","status":"ok","repo":"demo"}'
-```
-
-If successful, the QQ target will receive a formatted message.
-
-## Secret verification
-
-You can set a shared secret and pass it either by query string or header:
-
-- Query: `?secret=YOUR_SECRET`
-- Header: `X-Webhook-Secret: YOUR_SECRET`
-
-Example:
-
-```bash
-python3 -m webhook_to_napcat \
-  --listen-port 8787 \
-  --path /webhook \
-  --secret my_shared_secret \
-  --napcat-base-url http://127.0.0.1:3001 \
-  --private YOUR_QQ_NUMBER
-```
-
-Test:
-
-```bash
-curl -X POST 'http://127.0.0.1:8787/webhook?secret=my_shared_secret' \
-  -H 'Content-Type: application/json' \
-  -d '{"event":"deploy","status":"ok"}'
-```
-
-## Configuration
-
-All of these can be passed as CLI flags. Most also support environment variables.
-
-| CLI flag | Env var | Description |
-|---|---|---|
-| `--listen-host` | `LISTEN_HOST` | Bind address, default `0.0.0.0` |
-| `--listen-port` | `LISTEN_PORT` | Listen port, default `8787` |
-| `--path` | `WEBHOOK_PATH` | Webhook path, default `/webhook` |
-| `--secret` | `WEBHOOK_SECRET` | Optional shared secret |
-| `--napcat-base-url` | `NAPCAT_BASE_URL` | NapCat HTTP base URL, default `http://127.0.0.1:3001` |
-| `--napcat-token` | `NAPCAT_TOKEN` | Optional NapCat access token |
-| `--napcat-token-mode` | `NAPCAT_TOKEN_MODE` | `header` or `query` |
-| `--private` | `NAPCAT_PRIVATE_QQ` | Target QQ private chat user ID |
-| `--group` | `NAPCAT_GROUP_QQ` | Target QQ group ID |
-| `--timeout` | `NAPCAT_TIMEOUT` | Per-request timeout |
-| `--retries` | `NAPCAT_RETRIES` | Retry count |
-| `--chunk-size` | `QQ_CHUNK_SIZE` | QQ single-message chunk size |
-| `--title-prefix` | `TITLE_PREFIX` | Title prefix in forwarded messages |
-
-## Environment example
-
-See `.env.example`.
-
-## Docker
-
-### Build image
-
-```bash
-docker build -t webhook-to-napcat:latest .
-```
-
-### Run container
-
-Private chat example:
-
-```bash
-docker run -d \
-  --name webhook-to-napcat \
-  -p 8787:8787 \
-  -e LISTEN_HOST=0.0.0.0 \
-  -e LISTEN_PORT=8787 \
-  -e WEBHOOK_PATH=/webhook \
-  -e NAPCAT_BASE_URL=http://host.docker.internal:3001 \
-  -e NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER \
-  webhook-to-napcat:latest
-```
-
-Group example:
-
-```bash
-docker run -d \
-  --name webhook-to-napcat \
-  -p 8787:8787 \
-  -e LISTEN_HOST=0.0.0.0 \
-  -e LISTEN_PORT=8787 \
-  -e WEBHOOK_PATH=/webhook \
-  -e NAPCAT_BASE_URL=http://host.docker.internal:3001 \
-  -e NAPCAT_GROUP_QQ=123456789 \
-  webhook-to-napcat:latest
-```
-
-If your Docker environment cannot resolve `host.docker.internal` on Linux, replace it with:
-- the host LAN IP, or
-- `--add-host=host.docker.internal:host-gateway`
-
-Example:
-
-```bash
-docker run -d \
-  --name webhook-to-napcat \
-  --add-host=host.docker.internal:host-gateway \
-  -p 8787:8787 \
-  -e NAPCAT_BASE_URL=http://host.docker.internal:3001 \
-  -e NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER \
-  webhook-to-napcat:latest
-```
-
-Health check test:
-
-```bash
-curl http://127.0.0.1:8787/health
-```
-
-### Docker Compose
-
-This project also ships with `docker-compose.yml`.
-
-1. Copy the example environment file:
+1. Copy the environment file:
 
 ```bash
 cp .env.example .env
@@ -185,7 +41,7 @@ cp .env.example .env
 
 2. Edit `.env`
 
-At minimum, set one target:
+Set at least one target:
 
 ```env
 NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER
@@ -193,13 +49,26 @@ NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER
 # NAPCAT_GROUP_QQ=123456789
 ```
 
-3. Start it:
+3. Pull and start:
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
-### One-command deploy
+Check status:
+
+```bash
+docker compose ps
+```
+
+Check logs:
+
+```bash
+docker compose logs -f
+```
+
+### Option 2: One-command deploy
 
 A helper script is included:
 
@@ -208,16 +77,87 @@ A helper script is included:
 ```
 
 It will:
+
 - create `.env` from `.env.example` if missing
-- build the image
+- pull the latest image
 - start the service with Docker Compose
 - print current status
+
+## Docker notes
+
+The default `docker-compose.yml` uses a remote image instead of building locally:
+
+```yaml
+image: ghcr.io/etoile-7/webhook-to-napcat:latest
+```
+
+So normal deployments do not need `docker build` first.
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
+If `host.docker.internal` does not resolve in your Linux Docker environment, either:
+
+- replace it with your host IP, or
+- keep the compose mapping: `host.docker.internal:host-gateway`
+
+## Configuration
+
+These values are mainly provided via `.env`, and can also be overridden through environment variables.
+
+| Environment variable | Description |
+|---|---|
+| `LISTEN_HOST` | Bind address, default `0.0.0.0` |
+| `LISTEN_PORT` | Listen port, default `8787` |
+| `WEBHOOK_PATH` | Webhook path, default `/webhook` |
+| `WEBHOOK_SECRET` | Optional shared secret |
+| `NAPCAT_BASE_URL` | NapCat HTTP base URL, default `http://host.docker.internal:3001` |
+| `NAPCAT_TOKEN` | Optional NapCat access token |
+| `NAPCAT_TOKEN_MODE` | `header` or `query` |
+| `NAPCAT_PRIVATE_QQ` | Target QQ private user ID |
+| `NAPCAT_GROUP_QQ` | Target QQ group ID |
+| `NAPCAT_TIMEOUT` | Per-request timeout |
+| `NAPCAT_RETRIES` | Retry count |
+| `QQ_CHUNK_SIZE` | QQ single-message chunk size |
+| `TITLE_PREFIX` | Title prefix for forwarded messages |
+| `INCLUDE_HEADERS` | Whether to include selected request header info |
+
+See `.env.example` for an example.
+
+## Test webhook
+
+```bash
+curl -X POST 'http://127.0.0.1:8787/webhook' \
+  -H 'Content-Type: application/json' \
+  -d '{"event":"deploy","status":"ok","repo":"demo"}'
+```
+
+If forwarding works, your QQ target should receive a formatted message.
+
+## Secret verification
+
+You can protect the webhook with a shared secret using either:
+
+- query string: `?secret=YOUR_SECRET`
+- request header: `X-Webhook-Secret: YOUR_SECRET`
+
+Test example:
+
+```bash
+curl -X POST 'http://127.0.0.1:8787/webhook?secret=my_shared_secret' \
+  -H 'X-Webhook-Secret: my_shared_secret' \
+  -H 'Content-Type: application/json' \
+  -d '{"event":"deploy","status":"ok"}'
+```
 
 ## Reverse proxy examples
 
 ### Nginx
 
-See `examples/nginx/webhook-to-napcat.conf`.
+Example config: `examples/nginx/webhook-to-napcat.conf`
 
 Typical usage:
 
@@ -229,7 +169,7 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ### Caddy
 
-See `examples/caddy/Caddyfile`.
+Example config: `examples/caddy/Caddyfile`
 
 Typical usage:
 
@@ -242,18 +182,27 @@ sudo systemctl reload caddy
 
 This project includes `.github/workflows/docker-image.yml`.
 
-What it does:
-- builds the Docker image on push / PR
-- pushes images to GHCR on non-PR builds
-- generates tags like `latest`, branch name, tag version, and commit SHA
+By default it:
 
-Expected image name:
+- builds Docker images on push / PR
+- pushes images to GHCR on non-PR runs
+- generates tags such as `latest`, branch name, tag version, and commit SHA
+
+Default image name:
 
 ```text
 ghcr.io/etoile-7/webhook-to-napcat
 ```
 
-If needed, change the image path in the workflow file.
+## Developer note
+
+If you are modifying code, debugging the Dockerfile, or want a local dev image, you can still build manually:
+
+```bash
+docker build -t webhook-to-napcat:dev .
+```
+
+But this is no longer the default deployment path.
 
 ## Example systemd service
 
@@ -283,6 +232,7 @@ webhook-to-napcat/
 ├── Dockerfile
 ├── LICENSE
 ├── README.md
+├── README_en.md
 └── pyproject.toml
 ```
 

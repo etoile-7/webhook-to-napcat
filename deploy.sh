@@ -25,8 +25,9 @@ if [[ ! -f "$ENV_FILE" ]]; then
   echo "[info] please edit .env before first production use"
 fi
 
-echo "[info] building and starting webhook-to-napcat..."
-"${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" up -d --build
+echo "[info] pulling and starting webhook-to-napcat..."
+"${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" pull
+"${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" up -d
 
 echo "[info] current status:"
 "${COMPOSE_CMD[@]}" ps

@@ -14,171 +14,24 @@
 - 支持可选共享密钥校验
 - 自动按 QQ 聊天习惯拆分长消息
 - NapCat 请求支持重试和指数退避
-- 纯 Python 标准库实现，无运行时第三方依赖
+- 提供 GHCR 镜像，可直接拉取部署
 
-## 安装方式
-
-### 方式 1：直接本地运行
+## 获取项目
 
 ```bash
 git clone https://github.com/etoile-7/webhook-to-napcat.git
 cd webhook-to-napcat
-python3 -m webhook_to_napcat --help
 ```
 
-### 方式 2：可编辑安装
+## 快速部署
 
-```bash
-python3 -m pip install -e .
-webhook-to-napcat --help
+### 方式 1：Docker Compose（推荐）
+
+项目内已附带 `docker-compose.yml`，默认拉取 GHCR 镜像：
+
+```text
+ghcr.io/etoile-7/webhook-to-napcat:latest
 ```
-
-## 快速开始
-
-### 转发到 QQ 私聊
-
-```bash
-python3 -m webhook_to_napcat \
-  --listen-port 8787 \
-  --path /webhook \
-  --napcat-base-url http://127.0.0.1:3001 \
-  --private YOUR_QQ_NUMBER
-```
-
-### 转发到 QQ 群聊
-
-```bash
-python3 -m webhook_to_napcat \
-  --listen-port 8787 \
-  --path /webhook \
-  --napcat-base-url http://127.0.0.1:3001 \
-  --group 123456789
-```
-
-### 测试 webhook
-
-```bash
-curl -X POST 'http://127.0.0.1:8787/webhook' \
-  -H 'Content-Type: application/json' \
-  -d '{"event":"deploy","status":"ok","repo":"demo"}'
-```
-
-如果转发成功，目标 QQ 会收到一条整理后的消息。
-
-## 密钥校验
-
-你可以给 webhook 设置共享密钥，支持两种传递方式：
-
-- Query 参数：`?secret=YOUR_SECRET`
-- 请求头：`X-Webhook-Secret: YOUR_SECRET`
-
-示例：
-
-```bash
-python3 -m webhook_to_napcat \
-  --listen-port 8787 \
-  --path /webhook \
-  --secret my_shared_secret \
-  --napcat-base-url http://127.0.0.1:3001 \
-  --private YOUR_QQ_NUMBER
-```
-
-测试：
-
-```bash
-curl -X POST 'http://127.0.0.1:8787/webhook?secret=my_shared_secret' \
-  -H 'Content-Type: application/json' \
-  -d '{"event":"deploy","status":"ok"}'
-```
-
-## 配置说明
-
-这些参数都可以通过 CLI 传入，大多数也支持环境变量。
-
-| CLI 参数 | 环境变量 | 说明 |
-|---|---|---|
-| `--listen-host` | `LISTEN_HOST` | 监听地址，默认 `0.0.0.0` |
-| `--listen-port` | `LISTEN_PORT` | 监听端口，默认 `8787` |
-| `--path` | `WEBHOOK_PATH` | Webhook 路径，默认 `/webhook` |
-| `--secret` | `WEBHOOK_SECRET` | 可选共享密钥 |
-| `--napcat-base-url` | `NAPCAT_BASE_URL` | NapCat HTTP 地址，默认 `http://127.0.0.1:3001` |
-| `--napcat-token` | `NAPCAT_TOKEN` | 可选 NapCat 访问令牌 |
-| `--napcat-token-mode` | `NAPCAT_TOKEN_MODE` | `header` 或 `query` |
-| `--private` | `NAPCAT_PRIVATE_QQ` | 目标 QQ 私聊用户 ID |
-| `--group` | `NAPCAT_GROUP_QQ` | 目标 QQ 群号 |
-| `--timeout` | `NAPCAT_TIMEOUT` | 单次请求超时时间 |
-| `--retries` | `NAPCAT_RETRIES` | 重试次数 |
-| `--chunk-size` | `QQ_CHUNK_SIZE` | QQ 单条消息长度上限 |
-| `--title-prefix` | `TITLE_PREFIX` | 转发消息标题前缀 |
-
-## 环境变量示例
-
-参见：`.env.example`
-
-## Docker 部署
-
-### 构建镜像
-
-```bash
-docker build -t webhook-to-napcat:latest .
-```
-
-### 直接运行容器
-
-私聊示例：
-
-```bash
-docker run -d \
-  --name webhook-to-napcat \
-  -p 8787:8787 \
-  -e LISTEN_HOST=0.0.0.0 \
-  -e LISTEN_PORT=8787 \
-  -e WEBHOOK_PATH=/webhook \
-  -e NAPCAT_BASE_URL=http://host.docker.internal:3001 \
-  -e NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER \
-  webhook-to-napcat:latest
-```
-
-群聊示例：
-
-```bash
-docker run -d \
-  --name webhook-to-napcat \
-  -p 8787:8787 \
-  -e LISTEN_HOST=0.0.0.0 \
-  -e LISTEN_PORT=8787 \
-  -e WEBHOOK_PATH=/webhook \
-  -e NAPCAT_BASE_URL=http://host.docker.internal:3001 \
-  -e NAPCAT_GROUP_QQ=123456789 \
-  webhook-to-napcat:latest
-```
-
-如果你在 Linux 上 Docker 里无法解析 `host.docker.internal`，可以：
-
-- 改成宿主机实际 IP
-- 或加上 `--add-host=host.docker.internal:host-gateway`
-
-示例：
-
-```bash
-docker run -d \
-  --name webhook-to-napcat \
-  --add-host=host.docker.internal:host-gateway \
-  -p 8787:8787 \
-  -e NAPCAT_BASE_URL=http://host.docker.internal:3001 \
-  -e NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER \
-  webhook-to-napcat:latest
-```
-
-健康检查：
-
-```bash
-curl http://127.0.0.1:8787/health
-```
-
-### Docker Compose
-
-项目内已附带 `docker-compose.yml`。
 
 1. 复制环境变量文件：
 
@@ -196,13 +49,26 @@ NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER
 # NAPCAT_GROUP_QQ=123456789
 ```
 
-3. 启动：
+3. 拉取并启动：
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
-### 一键部署
+查看状态：
+
+```bash
+docker compose ps
+```
+
+查看日志：
+
+```bash
+docker compose logs -f
+```
+
+### 方式 2：一键部署
 
 项目内自带部署脚本：
 
@@ -213,9 +79,79 @@ docker compose up -d --build
 它会自动：
 
 - 如果 `.env` 不存在，就从 `.env.example` 复制一份
-- 构建镜像
+- 拉取最新镜像
 - 用 Docker Compose 启动服务
 - 输出当前运行状态
+
+## Docker 说明
+
+当前项目的 `docker-compose.yml` 默认使用远程镜像，不在本地构建：
+
+```yaml
+image: ghcr.io/etoile-7/webhook-to-napcat:latest
+```
+
+所以普通用户部署时，不需要先执行 `docker build`。
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
+如果你在 Linux 上 Docker 里无法解析 `host.docker.internal`，可以：
+
+- 改成宿主机实际 IP
+- 或保留 compose 里的：`host.docker.internal:host-gateway`
+
+## 配置说明
+
+这些参数主要通过 `.env` 提供，也支持环境变量覆盖。
+
+| 环境变量 | 说明 |
+|---|---|
+| `LISTEN_HOST` | 监听地址，默认 `0.0.0.0` |
+| `LISTEN_PORT` | 监听端口，默认 `8787` |
+| `WEBHOOK_PATH` | Webhook 路径，默认 `/webhook` |
+| `WEBHOOK_SECRET` | 可选共享密钥 |
+| `NAPCAT_BASE_URL` | NapCat HTTP 地址，默认 `http://host.docker.internal:3001` |
+| `NAPCAT_TOKEN` | 可选 NapCat 访问令牌 |
+| `NAPCAT_TOKEN_MODE` | `header` 或 `query` |
+| `NAPCAT_PRIVATE_QQ` | 目标 QQ 私聊用户 ID |
+| `NAPCAT_GROUP_QQ` | 目标 QQ 群号 |
+| `NAPCAT_TIMEOUT` | 单次请求超时时间 |
+| `NAPCAT_RETRIES` | 重试次数 |
+| `QQ_CHUNK_SIZE` | QQ 单条消息长度上限 |
+| `TITLE_PREFIX` | 转发消息标题前缀 |
+| `INCLUDE_HEADERS` | 是否附带部分请求头信息 |
+
+环境变量示例见：`.env.example`
+
+## 测试 webhook
+
+```bash
+curl -X POST 'http://127.0.0.1:8787/webhook' \
+  -H 'Content-Type: application/json' \
+  -d '{"event":"deploy","status":"ok","repo":"demo"}'
+```
+
+如果转发成功，目标 QQ 会收到一条整理后的消息。
+
+## 密钥校验
+
+你可以给 webhook 设置共享密钥，支持两种传递方式：
+
+- Query 参数：`?secret=YOUR_SECRET`
+- 请求头：`X-Webhook-Secret: YOUR_SECRET`
+
+测试：
+
+```bash
+curl -X POST 'http://127.0.0.1:8787/webhook?secret=my_shared_secret' \
+  -H 'X-Webhook-Secret: my_shared_secret' \
+  -H 'Content-Type: application/json' \
+  -d '{"event":"deploy","status":"ok"}'
+```
 
 ## 反向代理示例
 
@@ -258,7 +194,15 @@ sudo systemctl reload caddy
 ghcr.io/etoile-7/webhook-to-napcat
 ```
 
-如果你需要，可以自行修改 workflow 里的镜像路径。
+## 开发者说明
+
+如果你是在修改代码、调试 Dockerfile 或想自己本地构建开发镜像，可以手动执行：
+
+```bash
+docker build -t webhook-to-napcat:dev .
+```
+
+但这不是普通部署的默认方式。
 
 ## systemd 服务示例
 

@@ -2,8 +2,9 @@ version: "3.9"
 
 services:
   webhook-to-napcat:
-    build: .
+    image: ghcr.io/etoile-7/webhook-to-napcat:latest
     container_name: webhook-to-napcat
+    pull_policy: always
     restart: unless-stopped
     ports:
       - "8787:8787"
