@@ -116,6 +116,90 @@ These values are mainly provided via `.env`, and can also be overridden through 
 
 See `.env.example` for an example.
 
+## Connecting to NapCat
+
+This project sends QQ messages through NapCat's OneBot v11 HTTP API. The connection method is HTTP, not WebSocket.
+
+The key settings in `.env` are:
+
+```env
+NAPCAT_BASE_URL=http://host.docker.internal:3001
+NAPCAT_TOKEN=
+NAPCAT_TOKEN_MODE=header
+```
+
+### What these fields mean
+
+- `NAPCAT_BASE_URL`: the NapCat HTTP API endpoint
+- `NAPCAT_TOKEN`: fill this if your NapCat instance requires authentication; otherwise leave it empty
+- `NAPCAT_TOKEN_MODE`: authentication transport mode, either `header` or `query`
+
+### Common connection scenarios
+
+#### Scenario 1: NapCat runs on the host, this project runs in Docker
+
+Recommended:
+
+```env
+NAPCAT_BASE_URL=http://host.docker.internal:3001
+```
+
+The compose file already includes:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+So in most Linux Docker environments, the container can reach NapCat on the host directly.
+
+#### Scenario 2: NapCat does not use port 3001
+
+Change it to the actual HTTP API port:
+
+```env
+NAPCAT_BASE_URL=http://host.docker.internal:YOUR_PORT
+```
+
+#### Scenario 3: `host.docker.internal` does not work
+
+Use the real host IP instead, for example:
+
+```env
+NAPCAT_BASE_URL=http://192.168.1.77:3001
+```
+
+### If NapCat uses a token
+
+```env
+NAPCAT_TOKEN=your_token_here
+NAPCAT_TOKEN_MODE=header
+```
+
+If your NapCat instance expects token auth via query string, change it to:
+
+```env
+NAPCAT_TOKEN_MODE=query
+```
+
+### How to verify the NapCat connection
+
+First check container logs:
+
+```bash
+docker compose logs -f
+```
+
+Then send a test webhook:
+
+```bash
+curl -X POST 'http://127.0.0.1:8787/webhook' \
+  -H 'Content-Type: application/json' \
+  -d '{"event":"test","status":"ok"}'
+```
+
+If the setup is correct, your QQ target should receive a message. If the NapCat URL or token is wrong, logs will usually show connection failures, 401/403 errors, or timeouts.
+
 ## Docker notes
 
 The default `docker-compose.yml` uses the remote image:

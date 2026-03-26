@@ -116,6 +116,90 @@ docker compose logs -f
 
 环境变量示例见：`.env.example`
 
+## 连接 NapCat
+
+这个项目通过 NapCat 的 OneBot v11 HTTP API 发消息给 QQ，连接方式是 HTTP，不是 WebSocket。
+
+最关键的配置在 `.env`：
+
+```env
+NAPCAT_BASE_URL=http://host.docker.internal:3001
+NAPCAT_TOKEN=
+NAPCAT_TOKEN_MODE=header
+```
+
+### 这 3 个字段分别是什么
+
+- `NAPCAT_BASE_URL`：NapCat HTTP API 地址
+- `NAPCAT_TOKEN`：如果你的 NapCat 开了鉴权，就填这里；没开可留空
+- `NAPCAT_TOKEN_MODE`：鉴权传递方式，支持 `header` 或 `query`
+
+### 常见连接场景
+
+#### 场景 1：NapCat 跑在宿主机，当前项目跑在 Docker 容器里
+
+推荐：
+
+```env
+NAPCAT_BASE_URL=http://host.docker.internal:3001
+```
+
+项目的 compose 已经带了：
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+所以大多数 Linux Docker 环境下都能直接访问宿主机上的 NapCat。
+
+#### 场景 2：NapCat 不在 3001 端口
+
+把端口改成你实际的 HTTP API 端口：
+
+```env
+NAPCAT_BASE_URL=http://host.docker.internal:实际端口
+```
+
+#### 场景 3：`host.docker.internal` 不可用
+
+可以直接改成宿主机实际 IP，例如：
+
+```env
+NAPCAT_BASE_URL=http://192.168.1.77:3001
+```
+
+### 如果 NapCat 开了 token
+
+```env
+NAPCAT_TOKEN=your_token_here
+NAPCAT_TOKEN_MODE=header
+```
+
+如果你的 NapCat 要求 query 方式传 token，则改成：
+
+```env
+NAPCAT_TOKEN_MODE=query
+```
+
+### NapCat 连接是否正常，怎么判断
+
+启动后先看容器日志：
+
+```bash
+docker compose logs -f
+```
+
+然后发一个测试 webhook：
+
+```bash
+curl -X POST 'http://127.0.0.1:8787/webhook' \
+  -H 'Content-Type: application/json' \
+  -d '{"event":"test","status":"ok"}'
+```
+
+如果配置正确，目标 QQ 会收到消息；如果 NapCat 地址或 token 错了，日志里通常会看到连接失败、401、403 或超时。
+
 ## Docker 说明
 
 当前项目的 `docker-compose.yml` 默认使用远程镜像：
