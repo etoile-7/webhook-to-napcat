@@ -6,28 +6,6 @@
 
 一个开箱即用的小项目：把服务器事件、CI 通知、应用回调或自定义 Webhook，快速变成 QQ 消息。
 
-## 30 秒部署
-
-```bash
-git clone https://github.com/etoile-7/webhook-to-napcat.git
-cd webhook-to-napcat
-# 直接编辑 docker-compose.yml，填好 NAPCAT_BASE_URL 和 QQ 号
-docker compose pull
-docker compose up -d
-```
-
-健康检查：
-
-```bash
-curl http://127.0.0.1:8787/health
-```
-
-默认镜像：
-
-```text
-ghcr.io/etoile-7/webhook-to-napcat:latest
-```
-
 ## 功能特性
 
 - 监听可配置的 host / port / path
