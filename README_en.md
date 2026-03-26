@@ -11,8 +11,7 @@ A ready-to-run tiny project for turning server events, CI notifications, app cal
 ```bash
 git clone https://github.com/etoile-7/webhook-to-napcat.git
 cd webhook-to-napcat
-cp .env.example .env
-# edit .env and set NAPCAT_PRIVATE_QQ or NAPCAT_GROUP_QQ
+# edit docker-compose.yml and set NAPCAT_BASE_URL plus your QQ target
 docker compose pull
 docker compose up -d
 ```
@@ -45,23 +44,27 @@ ghcr.io/etoile-7/webhook-to-napcat:latest
 
 The included `docker-compose.yml` pulls the GHCR image by default, so local image builds are not required.
 
-1. Copy the environment file:
+Just edit the `environment` section in `docker-compose.yml`:
 
-```bash
-cp .env.example .env
+```yaml
+environment:
+  LISTEN_HOST: "0.0.0.0"
+  LISTEN_PORT: "8787"
+  WEBHOOK_PATH: "/webhook"
+  WEBHOOK_SECRET: ""
+  NAPCAT_BASE_URL: "http://host.docker.internal:3001"
+  NAPCAT_TOKEN: ""
+  NAPCAT_TOKEN_MODE: "header"
+  NAPCAT_PRIVATE_QQ: "YOUR_QQ_NUMBER"
+  NAPCAT_GROUP_QQ: ""
 ```
 
-2. Edit `.env`
+At minimum, change these:
 
-Set at least one target:
+- `NAPCAT_BASE_URL`
+- `NAPCAT_PRIVATE_QQ` or `NAPCAT_GROUP_QQ`
 
-```env
-NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER
-# or
-# NAPCAT_GROUP_QQ=123456789
-```
-
-3. Pull and start:
+Then start it:
 
 ```bash
 docker compose pull
@@ -80,22 +83,35 @@ Check logs:
 docker compose logs -f
 ```
 
-### One-command deploy
+### Docker run
+
+If you do not want to edit compose, you can run it directly with one command:
 
 ```bash
-./deploy.sh
+docker run -d \
+  --name webhook-to-napcat \
+  --restart unless-stopped \
+  --add-host=host.docker.internal:host-gateway \
+  -p 8787:8787 \
+  -e LISTEN_HOST=0.0.0.0 \
+  -e LISTEN_PORT=8787 \
+  -e WEBHOOK_PATH=/webhook \
+  -e NAPCAT_BASE_URL=http://host.docker.internal:3001 \
+  -e NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER \
+  ghcr.io/etoile-7/webhook-to-napcat:latest
 ```
 
-It will:
+For group delivery, replace:
 
-- create `.env` from `.env.example` if missing
-- pull the latest image
-- start the service with Docker Compose
-- print current status
+- `NAPCAT_PRIVATE_QQ=...`
+
+with:
+
+- `NAPCAT_GROUP_QQ=YOUR_GROUP_ID`
 
 ## Configuration
 
-These values are mainly provided via `.env`, and can also be overridden through environment variables.
+Configuration is mainly written directly in `docker-compose.yml` under `environment`, or passed with `docker run -e ...`.
 
 | Environment variable | Description |
 |---|---|
@@ -114,18 +130,16 @@ These values are mainly provided via `.env`, and can also be overridden through 
 | `TITLE_PREFIX` | Title prefix for forwarded messages |
 | `INCLUDE_HEADERS` | Whether to include selected request header info |
 
-See `.env.example` for an example.
-
 ## Connecting to NapCat
 
 This project sends QQ messages through NapCat's OneBot v11 HTTP API. The connection method is HTTP, not WebSocket.
 
-The key settings in `.env` are:
+The key settings are:
 
-```env
-NAPCAT_BASE_URL=http://host.docker.internal:3001
-NAPCAT_TOKEN=
-NAPCAT_TOKEN_MODE=header
+```yaml
+NAPCAT_BASE_URL: "http://host.docker.internal:3001"
+NAPCAT_TOKEN: ""
+NAPCAT_TOKEN_MODE: "header"
 ```
 
 ### What these fields mean
@@ -140,8 +154,8 @@ NAPCAT_TOKEN_MODE=header
 
 Recommended:
 
-```env
-NAPCAT_BASE_URL=http://host.docker.internal:3001
+```yaml
+NAPCAT_BASE_URL: "http://host.docker.internal:3001"
 ```
 
 The compose file already includes:
@@ -157,29 +171,29 @@ So in most Linux Docker environments, the container can reach NapCat on the host
 
 Change it to the actual HTTP API port:
 
-```env
-NAPCAT_BASE_URL=http://host.docker.internal:YOUR_PORT
+```yaml
+NAPCAT_BASE_URL: "http://host.docker.internal:YOUR_PORT"
 ```
 
 #### Scenario 3: `host.docker.internal` does not work
 
 Use the real host IP instead, for example:
 
-```env
-NAPCAT_BASE_URL=http://192.168.1.77:3001
+```yaml
+NAPCAT_BASE_URL: "http://192.168.1.77:3001"
 ```
 
 ### If NapCat uses a token
 
-```env
-NAPCAT_TOKEN=your_token_here
-NAPCAT_TOKEN_MODE=header
+```yaml
+NAPCAT_TOKEN: "your_token_here"
+NAPCAT_TOKEN_MODE: "header"
 ```
 
 If your NapCat instance expects token auth via query string, change it to:
 
-```env
-NAPCAT_TOKEN_MODE=query
+```yaml
+NAPCAT_TOKEN_MODE: "query"
 ```
 
 ### How to verify the NapCat connection
@@ -309,9 +323,7 @@ webhook-to-napcat/
 │   ├── __main__.py
 │   └── server.py
 ├── .dockerignore
-├── .env.example
 ├── .gitignore
-├── deploy.sh
 ├── docker-compose.yml
 ├── Dockerfile
 ├── LICENSE

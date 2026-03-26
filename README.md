@@ -11,8 +11,7 @@
 ```bash
 git clone https://github.com/etoile-7/webhook-to-napcat.git
 cd webhook-to-napcat
-cp .env.example .env
-# 编辑 .env，至少填 NAPCAT_PRIVATE_QQ 或 NAPCAT_GROUP_QQ
+# 直接编辑 docker-compose.yml，填好 NAPCAT_BASE_URL 和 QQ 号
 docker compose pull
 docker compose up -d
 ```
@@ -45,23 +44,27 @@ ghcr.io/etoile-7/webhook-to-napcat:latest
 
 项目内已附带 `docker-compose.yml`，默认拉取 GHCR 镜像，不需要本地构建。
 
-1. 复制环境变量文件：
+你只需要直接编辑 `docker-compose.yml` 里的 `environment`：
 
-```bash
-cp .env.example .env
+```yaml
+environment:
+  LISTEN_HOST: "0.0.0.0"
+  LISTEN_PORT: "8787"
+  WEBHOOK_PATH: "/webhook"
+  WEBHOOK_SECRET: ""
+  NAPCAT_BASE_URL: "http://host.docker.internal:3001"
+  NAPCAT_TOKEN: ""
+  NAPCAT_TOKEN_MODE: "header"
+  NAPCAT_PRIVATE_QQ: "YOUR_QQ_NUMBER"
+  NAPCAT_GROUP_QQ: ""
 ```
 
-2. 编辑 `.env`
+至少改这两项：
 
-至少设置一个目标：
+- `NAPCAT_BASE_URL`
+- `NAPCAT_PRIVATE_QQ` 或 `NAPCAT_GROUP_QQ`
 
-```env
-NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER
-# 或
-# NAPCAT_GROUP_QQ=123456789
-```
-
-3. 拉取并启动：
+然后启动：
 
 ```bash
 docker compose pull
@@ -80,22 +83,35 @@ docker compose ps
 docker compose logs -f
 ```
 
-### 一键部署
+### Docker run
+
+如果你不想改 compose，也可以直接一条命令启动：
 
 ```bash
-./deploy.sh
+docker run -d \
+  --name webhook-to-napcat \
+  --restart unless-stopped \
+  --add-host=host.docker.internal:host-gateway \
+  -p 8787:8787 \
+  -e LISTEN_HOST=0.0.0.0 \
+  -e LISTEN_PORT=8787 \
+  -e WEBHOOK_PATH=/webhook \
+  -e NAPCAT_BASE_URL=http://host.docker.internal:3001 \
+  -e NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER \
+  ghcr.io/etoile-7/webhook-to-napcat:latest
 ```
 
-它会自动：
+如果发群，把：
 
-- 如果 `.env` 不存在，就从 `.env.example` 复制一份
-- 拉取最新镜像
-- 用 Docker Compose 启动服务
-- 输出当前运行状态
+- `NAPCAT_PRIVATE_QQ=...`
+
+换成：
+
+- `NAPCAT_GROUP_QQ=你的群号`
 
 ## 配置说明
 
-这些参数主要通过 `.env` 提供，也支持环境变量覆盖。
+配置主要写在 `docker-compose.yml` 的 `environment` 里，或者通过 `docker run -e ...` 直接传入。
 
 | 环境变量 | 说明 |
 |---|---|
@@ -114,18 +130,16 @@ docker compose logs -f
 | `TITLE_PREFIX` | 转发消息标题前缀 |
 | `INCLUDE_HEADERS` | 是否附带部分请求头信息 |
 
-环境变量示例见：`.env.example`
-
 ## 连接 NapCat
 
 这个项目通过 NapCat 的 OneBot v11 HTTP API 发消息给 QQ，连接方式是 HTTP，不是 WebSocket。
 
-最关键的配置在 `.env`：
+最关键的配置是：
 
-```env
-NAPCAT_BASE_URL=http://host.docker.internal:3001
-NAPCAT_TOKEN=
-NAPCAT_TOKEN_MODE=header
+```yaml
+NAPCAT_BASE_URL: "http://host.docker.internal:3001"
+NAPCAT_TOKEN: ""
+NAPCAT_TOKEN_MODE: "header"
 ```
 
 ### 这 3 个字段分别是什么
@@ -140,8 +154,8 @@ NAPCAT_TOKEN_MODE=header
 
 推荐：
 
-```env
-NAPCAT_BASE_URL=http://host.docker.internal:3001
+```yaml
+NAPCAT_BASE_URL: "http://host.docker.internal:3001"
 ```
 
 项目的 compose 已经带了：
@@ -157,29 +171,29 @@ extra_hosts:
 
 把端口改成你实际的 HTTP API 端口：
 
-```env
-NAPCAT_BASE_URL=http://host.docker.internal:实际端口
+```yaml
+NAPCAT_BASE_URL: "http://host.docker.internal:实际端口"
 ```
 
 #### 场景 3：`host.docker.internal` 不可用
 
 可以直接改成宿主机实际 IP，例如：
 
-```env
-NAPCAT_BASE_URL=http://192.168.1.77:3001
+```yaml
+NAPCAT_BASE_URL: "http://192.168.1.77:3001"
 ```
 
 ### 如果 NapCat 开了 token
 
-```env
-NAPCAT_TOKEN=your_token_here
-NAPCAT_TOKEN_MODE=header
+```yaml
+NAPCAT_TOKEN: "your_token_here"
+NAPCAT_TOKEN_MODE: "header"
 ```
 
 如果你的 NapCat 要求 query 方式传 token，则改成：
 
-```env
-NAPCAT_TOKEN_MODE=query
+```yaml
+NAPCAT_TOKEN_MODE: "query"
 ```
 
 ### NapCat 连接是否正常，怎么判断
@@ -309,9 +323,7 @@ webhook-to-napcat/
 │   ├── __main__.py
 │   └── server.py
 ├── .dockerignore
-├── .env.example
 ├── .gitignore
-├── deploy.sh
 ├── docker-compose.yml
 ├── Dockerfile
 ├── LICENSE
