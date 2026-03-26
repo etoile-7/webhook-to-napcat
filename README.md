@@ -217,6 +217,8 @@ curl -X POST 'http://127.0.0.1:8787/webhook' \
 
 如果转发成功，目标 QQ 会收到一条整理后的消息。
 
+补充：如果 webhook 的 JSON payload 里包含 `content` 字段（例如短信/验证码转发场景），程序会优先只发送 `content` 的内容，不再附带路径、UA 和完整 payload。
+
 ## 密钥校验
 
 你可以给 webhook 设置共享密钥，支持两种传递方式：

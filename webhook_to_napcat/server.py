@@ -176,6 +176,11 @@ def summarize_payload(payload: Any) -> str:
 
 
 def build_forward_text(cfg: Config, handler: BaseHTTPRequestHandler, payload: Any) -> str:
+    if isinstance(payload, dict):
+        content = payload.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
     title = f"{cfg.title_prefix} 收到新 webhook"
     lines = [title]
     lines.append(f"路径: {handler.path}")

@@ -241,6 +241,8 @@ curl -X POST 'http://127.0.0.1:8787/webhook' \
 
 If forwarding works, your QQ target should receive a formatted message.
 
+Note: if the webhook JSON payload contains a `content` field (for example SMS / verification-code forwarding), the service will send only the `content` text and skip path, UA, and full payload details.
+
 ## Secret verification
 
 You can protect the webhook with a shared secret using either:
