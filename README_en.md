@@ -111,6 +111,70 @@ with:
 
 - `NAPCAT_GROUP_QQ=YOUR_GROUP_ID`
 
+## Rule template (use this for future webhook formats)
+
+The project includes an editable rule file:
+
+- `rules.json`
+
+By default:
+
+- the container mounts `./rules.json` to `/app/rules.json`
+- the service reads `WEBHOOK_RULES_PATH=/app/rules.json`
+
+That means when you need to support a new webhook format later, you do not have to modify Python code. Just edit the rule file and restart the container.
+
+Current default rule example:
+
+```json
+{
+  "rules": [
+    {
+      "name": "sms_content_only",
+      "match": { "has_keys": ["content"] },
+      "output": { "type": "field", "field": "content" }
+    }
+  ],
+  "default": { "type": "summary" }
+}
+```
+
+### Supported rule features
+
+- `match.has_keys`: payload must contain these keys
+- `match.path_contains`: request path contains a string
+- `match.header_equals`: exact header match
+- `match.field_equals`: a payload field equals a value (supports dotted paths like `a.b`)
+- `output.type = field`: send only one field
+- `output.type = template`: render a text template
+- `output.type = summary`: use the default summary mode
+
+### Example 1: send only `content` for SMS-like webhooks
+
+```json
+{
+  "name": "sms_content_only",
+  "match": { "has_keys": ["content"] },
+  "output": { "type": "field", "field": "content" }
+}
+```
+
+### Example 2: simple GitHub-style template output
+
+```json
+{
+  "name": "github_simple",
+  "match": { "has_keys": ["repository", "action"] },
+  "output": { "type": "template", "template": "GitHub {action}: {repository}" }
+}
+```
+
+After editing `rules.json`, restart:
+
+```bash
+docker compose up -d
+```
+
 ## Configuration
 
 Configuration is mainly written directly in `docker-compose.yml` under `environment`, or passed with `docker run -e ...`.

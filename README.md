@@ -104,6 +104,7 @@ docker run -d \
 | `NAPCAT_GROUP_QQ` | 目标 QQ 群号 |
 | `NAPCAT_TIMEOUT` | 单次请求超时时间 |
 | `NAPCAT_RETRIES` | 重试次数 |
+| `WEBHOOK_RULES_PATH` | 规则文件路径，默认 `/app/rules.json` |
 | `QQ_CHUNK_SIZE` | QQ 单条消息长度上限 |
 | `TITLE_PREFIX` | 转发消息标题前缀 |
 | `INCLUDE_HEADERS` | 是否附带部分请求头信息 |
@@ -243,6 +244,79 @@ curl -X POST 'http://127.0.0.1:8787/webhook?secret=my_shared_secret' \
 
 ```bash
 sudo cp examples/nginx/webhook-to-napcat.conf /etc/nginx/sites-available/webhook-to-napcat
+sudo ln -s /etc/nginx/sites-available/webhook-to-napcat /etc/nginx/sites-enabled/webhook-to-napcat
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### Caddy
+
+配置文件示例：`examples/caddy/Caddyfile`
+
+```bash
+sudo cp examples/caddy/Caddyfile /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+## GitHub Actions
+
+项目内包含：`.github/workflows/docker-image.yml`
+
+默认功能：
+
+- push / PR 时自动构建 Docker 镜像
+- 非 PR 构建时自动推送到 GHCR
+- 自动生成 `latest`、分支名、tag 版本号、commit SHA 等标签
+
+默认镜像名：
+
+```text
+ghcr.io/etoile-7/webhook-to-napcat
+```
+
+## 开发者说明
+
+如果你是在修改代码、调试 Dockerfile 或想自己本地构建开发镜像，可以手动执行：
+
+```bash
+docker build -t webhook-to-napcat:dev .
+```
+
+但这不是普通部署的默认方式。
+
+## systemd 服务示例
+
+参见：`examples/systemd/webhook-to-napcat.service`
+
+## 项目结构
+
+```text
+webhook-to-napcat/
+├── .github/
+│   └── workflows/
+├── examples/
+│   ├── caddy/
+│   ├── nginx/
+│   └── systemd/
+├── scripts/
+│   └── webhook_to_napcat.py
+├── webhook_to_napcat/
+│   ├── __init__.py
+│   ├── __main__.py
+│   └── server.py
+├── .dockerignore
+├── .gitignore
+├── docker-compose.yml
+├── Dockerfile
+├── LICENSE
+├── README.md
+├── README_en.md
+└── pyproject.toml
+```
+
+## License
+
+MIT
+tc/nginx/sites-available/webhook-to-napcat
 sudo ln -s /etc/nginx/sites-available/webhook-to-napcat /etc/nginx/sites-enabled/webhook-to-napcat
 sudo nginx -t && sudo systemctl reload nginx
 ```

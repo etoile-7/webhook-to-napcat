@@ -35,6 +35,7 @@ class Config:
     chunk_size: int
     title_prefix: str
     include_headers: bool
+    rules_path: str
 
 
 def post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: float, retries: int) -> dict[str, Any]:
@@ -175,11 +176,117 @@ def summarize_payload(payload: Any) -> str:
     return str(payload)
 
 
+def load_rules(path: str) -> dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:  # noqa: BLE001
+        eprint(f"[rules] failed to load {path}: {exc}")
+        return {}
+
+
+def get_field_value(payload: Any, field: str) -> Any:
+    current = payload
+    for part in field.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def rule_matches(rule: dict[str, Any], handler: BaseHTTPRequestHandler, payload: Any) -> bool:
+    match = rule.get("match")
+    if not isinstance(match, dict):
+        return True
+
+    has_keys = match.get("has_keys")
+    if has_keys is not None:
+        if not isinstance(payload, dict):
+            return False
+        for key in has_keys:
+            if key not in payload:
+                return False
+
+    path_contains = match.get("path_contains")
+    if path_contains and path_contains not in handler.path:
+        return False
+
+    header_equals = match.get("header_equals")
+    if isinstance(header_equals, dict):
+        for key, expected in header_equals.items():
+            if handler.headers.get(key, "") != str(expected):
+                return False
+
+    field_equals = match.get("field_equals")
+    if isinstance(field_equals, dict):
+        for key, expected in field_equals.items():
+            if get_field_value(payload, key) != expected:
+                return False
+
+    return True
+
+
+def render_rule_output(rule: dict[str, Any], payload: Any) -> str | None:
+    output = rule.get("output")
+    if not isinstance(output, dict):
+        return None
+
+    kind = output.get("type", "summary")
+    if kind == "field":
+        field = str(output.get("field", "")).strip()
+        value = get_field_value(payload, field) if field else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if value is not None:
+            return str(value)
+        return None
+
+    if kind == "template":
+        template = str(output.get("template", "")).strip()
+        if not template:
+            return None
+        if isinstance(payload, dict):
+            flat = {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v) for k, v in payload.items()}
+            try:
+                return template.format(**flat).strip()
+            except Exception:  # noqa: BLE001
+                return template
+        return template
+
+    if kind == "summary":
+        return summarize_payload(payload).strip()
+
+    return None
+
+
+def apply_rules(cfg: Config, handler: BaseHTTPRequestHandler, payload: Any) -> str | None:
+    rules_doc = load_rules(cfg.rules_path)
+    rules = rules_doc.get("rules")
+    if isinstance(rules, list):
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            if rule_matches(rule, handler, payload):
+                rendered = render_rule_output(rule, payload)
+                if rendered:
+                    return rendered
+
+    default_rule = rules_doc.get("default")
+    if isinstance(default_rule, dict):
+        rendered = render_rule_output({"output": default_rule}, payload)
+        if rendered:
+            return rendered
+
+    return None
+
+
 def build_forward_text(cfg: Config, handler: BaseHTTPRequestHandler, payload: Any) -> str:
-    if isinstance(payload, dict):
-        content = payload.get("content")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
+    rules_text = apply_rules(cfg, handler, payload)
+    if rules_text:
+        return rules_text
 
     title = f"{cfg.title_prefix} 收到新 webhook"
     lines = [title]
@@ -283,6 +390,7 @@ def parse_args() -> Config:
     ap.add_argument("--chunk-size", type=int, default=int(os.getenv("QQ_CHUNK_SIZE", "280")))
     ap.add_argument("--title-prefix", default=os.getenv("TITLE_PREFIX", "📨"))
     ap.add_argument("--include-headers", action="store_true", default=os.getenv("INCLUDE_HEADERS", "1") not in {"0", "false", "False"})
+    ap.add_argument("--rules-path", default=os.getenv("WEBHOOK_RULES_PATH", "/app/rules.json"), help="规则文件路径（JSON）；用于按配置决定不同 webhook 的转发内容")
     args = ap.parse_args()
 
     private_target = args.private if args.private is not None else (int(private_env) if private_env else None)
@@ -312,6 +420,7 @@ def parse_args() -> Config:
         chunk_size=max(50, args.chunk_size),
         title_prefix=args.title_prefix,
         include_headers=args.include_headers,
+        rules_path=args.rules_path,
     )
 
 
@@ -328,6 +437,7 @@ def main() -> int:
                 "path": cfg.path,
                 "target": {"private": cfg.private, "group": cfg.group},
                 "napcat_base_url": cfg.napcat_base_url,
+                "rules_path": cfg.rules_path,
             },
             ensure_ascii=False,
         )

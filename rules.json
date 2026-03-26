@@ -1,0 +1,18 @@
+{
+  "rules": [
+    {
+      "name": "sms_content_only",
+      "description": "如果 payload 里有 content 字段，就只转发 content，适合短信/验证码 webhook",
+      "match": {
+        "has_keys": ["content"]
+      },
+      "output": {
+        "type": "field",
+        "field": "content"
+      }
+    }
+  ],
+  "default": {
+    "type": "summary"
+  }
+}

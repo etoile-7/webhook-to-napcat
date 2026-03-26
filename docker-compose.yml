@@ -46,6 +46,9 @@ services:
       NAPCAT_TIMEOUT: "10"
       NAPCAT_RETRIES: "5"
 
+      # 规则文件路径（容器内）；用于按模板匹配不同 webhook 的输出格式
+      WEBHOOK_RULES_PATH: "/app/rules.json"
+
       # 长消息拆分时，单条 QQ 消息的最大长度
       QQ_CHUNK_SIZE: "280"
 
@@ -54,6 +57,10 @@ services:
 
       # 是否在转发消息中附带部分请求头信息
       INCLUDE_HEADERS: "1"
+
+    volumes:
+      # 将规则模板文件挂载进容器；后续改规则只需要编辑这个文件
+      - "./rules.json:/app/rules.json:ro"
 
     extra_hosts:
       # 让容器可以访问宿主机上运行的服务
