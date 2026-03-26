@@ -1,0 +1,15 @@
+[Unit]
+Description=Webhook to NapCat bridge
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/webhook-to-napcat
+EnvironmentFile=/opt/webhook-to-napcat/.env
+ExecStart=/usr/bin/python3 -m webhook_to_napcat
+Restart=always
+RestartSec=3
+User=bellastar
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "webhook-to-napcat"
+version = "0.1.0"
+description = "Receive webhook HTTP requests and forward them to QQ through NapCat (OneBot v11)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "AIto" }
+]
+keywords = ["webhook", "napcat", "qq", "onebot", "forwarder"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+  "Topic :: Communications :: Chat",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/yourname/webhook-to-napcat"
+Repository = "https://github.com/yourname/webhook-to-napcat"
+Issues = "https://github.com/yourname/webhook-to-napcat/issues"
+
+[project.scripts]
+webhook-to-napcat = "webhook_to_napcat.server:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["webhook_to_napcat*"]

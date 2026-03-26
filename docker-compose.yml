@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  webhook-to-napcat:
+    build: .
+    container_name: webhook-to-napcat
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    env_file:
+      - .env
+    environment:
+      LISTEN_HOST: ${LISTEN_HOST:-0.0.0.0}
+      LISTEN_PORT: ${LISTEN_PORT:-8787}
+      WEBHOOK_PATH: ${WEBHOOK_PATH:-/webhook}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      NAPCAT_BASE_URL: ${NAPCAT_BASE_URL:-http://host.docker.internal:3001}
+      NAPCAT_TOKEN: ${NAPCAT_TOKEN:-}
+      NAPCAT_TOKEN_MODE: ${NAPCAT_TOKEN_MODE:-header}
+      NAPCAT_PRIVATE_QQ: ${NAPCAT_PRIVATE_QQ:-YOUR_QQ_NUMBER}
+      NAPCAT_GROUP_QQ: ${NAPCAT_GROUP_QQ:-}
+      NAPCAT_TIMEOUT: ${NAPCAT_TIMEOUT:-10}
+      NAPCAT_RETRIES: ${NAPCAT_RETRIES:-5}
+      QQ_CHUNK_SIZE: ${QQ_CHUNK_SIZE:-280}
+      TITLE_PREFIX: ${TITLE_PREFIX:-📨}
+      INCLUDE_HEADERS: ${INCLUDE_HEADERS:-1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
