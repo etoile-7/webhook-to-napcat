@@ -4,7 +4,30 @@
 
 Receive HTTP webhooks and forward them to QQ through NapCat (OneBot v11).
 
-A tiny Python project for turning server events, CI notifications, app callbacks, or custom webhooks into QQ messages.
+A ready-to-run tiny project for turning server events, CI notifications, app callbacks, or custom webhooks into QQ messages.
+
+## 30-second deploy
+
+```bash
+git clone https://github.com/etoile-7/webhook-to-napcat.git
+cd webhook-to-napcat
+cp .env.example .env
+# edit .env and set NAPCAT_PRIVATE_QQ or NAPCAT_GROUP_QQ
+docker compose pull
+docker compose up -d
+```
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
+Default image:
+
+```text
+ghcr.io/etoile-7/webhook-to-napcat:latest
+```
 
 ## Features
 
@@ -16,22 +39,11 @@ A tiny Python project for turning server events, CI notifications, app callbacks
 - Retry with exponential backoff for NapCat requests
 - Prebuilt GHCR image for direct deployment
 
-## Get the project
+## Deployment
 
-```bash
-git clone https://github.com/etoile-7/webhook-to-napcat.git
-cd webhook-to-napcat
-```
+### Docker Compose (recommended)
 
-## Quick deployment
-
-### Option 1: Docker Compose (recommended)
-
-The included `docker-compose.yml` pulls the GHCR image by default:
-
-```text
-ghcr.io/etoile-7/webhook-to-napcat:latest
-```
+The included `docker-compose.yml` pulls the GHCR image by default, so local image builds are not required.
 
 1. Copy the environment file:
 
@@ -68,9 +80,7 @@ Check logs:
 docker compose logs -f
 ```
 
-### Option 2: One-command deploy
-
-A helper script is included:
+### One-command deploy
 
 ```bash
 ./deploy.sh
@@ -82,27 +92,6 @@ It will:
 - pull the latest image
 - start the service with Docker Compose
 - print current status
-
-## Docker notes
-
-The default `docker-compose.yml` uses a remote image instead of building locally:
-
-```yaml
-image: ghcr.io/etoile-7/webhook-to-napcat:latest
-```
-
-So normal deployments do not need `docker build` first.
-
-Health check:
-
-```bash
-curl http://127.0.0.1:8787/health
-```
-
-If `host.docker.internal` does not resolve in your Linux Docker environment, either:
-
-- replace it with your host IP, or
-- keep the compose mapping: `host.docker.internal:host-gateway`
 
 ## Configuration
 
@@ -126,6 +115,21 @@ These values are mainly provided via `.env`, and can also be overridden through 
 | `INCLUDE_HEADERS` | Whether to include selected request header info |
 
 See `.env.example` for an example.
+
+## Docker notes
+
+The default `docker-compose.yml` uses the remote image:
+
+```yaml
+image: ghcr.io/etoile-7/webhook-to-napcat:latest
+```
+
+So normal deployments do not need `docker build` first.
+
+If `host.docker.internal` does not resolve in your Linux Docker environment, either:
+
+- replace it with your host IP, or
+- keep the compose mapping: `host.docker.internal:host-gateway`
 
 ## Test webhook
 
@@ -159,8 +163,6 @@ curl -X POST 'http://127.0.0.1:8787/webhook?secret=my_shared_secret' \
 
 Example config: `examples/nginx/webhook-to-napcat.conf`
 
-Typical usage:
-
 ```bash
 sudo cp examples/nginx/webhook-to-napcat.conf /etc/nginx/sites-available/webhook-to-napcat
 sudo ln -s /etc/nginx/sites-available/webhook-to-napcat /etc/nginx/sites-enabled/webhook-to-napcat
@@ -170,8 +172,6 @@ sudo nginx -t && sudo systemctl reload nginx
 ### Caddy
 
 Example config: `examples/caddy/Caddyfile`
-
-Typical usage:
 
 ```bash
 sudo cp examples/caddy/Caddyfile /etc/caddy/Caddyfile

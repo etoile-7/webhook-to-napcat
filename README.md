@@ -4,7 +4,30 @@
 
 通过 NapCat（OneBot v11）接收 HTTP Webhook 并转发到 QQ。
 
-这是一个很轻量的 Python 小项目，适合把“服务器事件 / CI 通知 / 应用回调 / 自定义 Webhook”快速转成 QQ 消息。
+一个开箱即用的小项目：把服务器事件、CI 通知、应用回调或自定义 Webhook，快速变成 QQ 消息。
+
+## 30 秒部署
+
+```bash
+git clone https://github.com/etoile-7/webhook-to-napcat.git
+cd webhook-to-napcat
+cp .env.example .env
+# 编辑 .env，至少填 NAPCAT_PRIVATE_QQ 或 NAPCAT_GROUP_QQ
+docker compose pull
+docker compose up -d
+```
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
+默认镜像：
+
+```text
+ghcr.io/etoile-7/webhook-to-napcat:latest
+```
 
 ## 功能特性
 
@@ -16,22 +39,11 @@
 - NapCat 请求支持重试和指数退避
 - 提供 GHCR 镜像，可直接拉取部署
 
-## 获取项目
+## 部署方式
 
-```bash
-git clone https://github.com/etoile-7/webhook-to-napcat.git
-cd webhook-to-napcat
-```
+### Docker Compose（推荐）
 
-## 快速部署
-
-### 方式 1：Docker Compose（推荐）
-
-项目内已附带 `docker-compose.yml`，默认拉取 GHCR 镜像：
-
-```text
-ghcr.io/etoile-7/webhook-to-napcat:latest
-```
+项目内已附带 `docker-compose.yml`，默认拉取 GHCR 镜像，不需要本地构建。
 
 1. 复制环境变量文件：
 
@@ -68,9 +80,7 @@ docker compose ps
 docker compose logs -f
 ```
 
-### 方式 2：一键部署
-
-项目内自带部署脚本：
+### 一键部署
 
 ```bash
 ./deploy.sh
@@ -82,27 +92,6 @@ docker compose logs -f
 - 拉取最新镜像
 - 用 Docker Compose 启动服务
 - 输出当前运行状态
-
-## Docker 说明
-
-当前项目的 `docker-compose.yml` 默认使用远程镜像，不在本地构建：
-
-```yaml
-image: ghcr.io/etoile-7/webhook-to-napcat:latest
-```
-
-所以普通用户部署时，不需要先执行 `docker build`。
-
-健康检查：
-
-```bash
-curl http://127.0.0.1:8787/health
-```
-
-如果你在 Linux 上 Docker 里无法解析 `host.docker.internal`，可以：
-
-- 改成宿主机实际 IP
-- 或保留 compose 里的：`host.docker.internal:host-gateway`
 
 ## 配置说明
 
@@ -126,6 +115,21 @@ curl http://127.0.0.1:8787/health
 | `INCLUDE_HEADERS` | 是否附带部分请求头信息 |
 
 环境变量示例见：`.env.example`
+
+## Docker 说明
+
+当前项目的 `docker-compose.yml` 默认使用远程镜像：
+
+```yaml
+image: ghcr.io/etoile-7/webhook-to-napcat:latest
+```
+
+所以普通部署时，不需要先执行 `docker build`。
+
+如果你在 Linux 上 Docker 里无法解析 `host.docker.internal`，可以：
+
+- 改成宿主机实际 IP
+- 或保留 compose 里的：`host.docker.internal:host-gateway`
 
 ## 测试 webhook
 
@@ -159,8 +163,6 @@ curl -X POST 'http://127.0.0.1:8787/webhook?secret=my_shared_secret' \
 
 配置文件示例：`examples/nginx/webhook-to-napcat.conf`
 
-常见用法：
-
 ```bash
 sudo cp examples/nginx/webhook-to-napcat.conf /etc/nginx/sites-available/webhook-to-napcat
 sudo ln -s /etc/nginx/sites-available/webhook-to-napcat /etc/nginx/sites-enabled/webhook-to-napcat
@@ -170,8 +172,6 @@ sudo nginx -t && sudo systemctl reload nginx
 ### Caddy
 
 配置文件示例：`examples/caddy/Caddyfile`
-
-常见用法：
 
 ```bash
 sudo cp examples/caddy/Caddyfile /etc/caddy/Caddyfile
