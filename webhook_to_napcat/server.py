@@ -11,12 +11,29 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 
 def eprint(*args: Any) -> None:
     print(*args, file=sys.stderr)
+
+
+def append_message_log(cfg: "Config", record: dict[str, Any]) -> None:
+    if not cfg.log_dir:
+        return
+
+    try:
+        log_dir = Path(cfg.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        month = datetime.now().strftime("%Y-%m")
+        log_path = log_dir / f"messages-{month}.jsonl"
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as exc:  # noqa: BLE001
+        eprint(f"[message-log-error] {exc}")
 
 
 @dataclass
@@ -36,6 +53,7 @@ class Config:
     title_prefix: str
     include_headers: bool
     rules_path: str
+    log_dir: str
 
 
 def post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: float, retries: int) -> dict[str, Any]:
@@ -101,16 +119,17 @@ def split_for_qq(text: str, max_len: int) -> list[str]:
     return chunks or [text[i : i + max_len] for i in range(0, len(text), max_len)]
 
 
-def send_text_to_napcat(cfg: Config, text: str) -> list[dict[str, Any]]:
+def send_text_to_napcat(cfg: Config, text: str) -> tuple[list[dict[str, Any]], list[str]]:
     url, headers, _ = build_napcat_request(cfg)
     target_payload = {"user_id": cfg.private} if cfg.private is not None else {"group_id": cfg.group}
 
     results = []
-    for chunk in split_for_qq(text, cfg.chunk_size):
+    chunks = split_for_qq(text, cfg.chunk_size)
+    for chunk in chunks:
         payload = dict(target_payload)
         payload["message"] = [{"type": "text", "data": {"text": chunk}}]
         results.append(post_json(url, payload, headers=headers, timeout=cfg.timeout, retries=cfg.retries))
-    return results
+    return results, chunks
 
 
 def maybe_parse_json(raw: bytes) -> Any:
@@ -347,11 +366,27 @@ class WebhookHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         payload = parse_body(self.headers.get("Content-Type", ""), raw)
         text = build_forward_text(self.cfg, self, payload)
+        record: dict[str, Any] = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "path": parsed.path,
+            "remote_ip": self.client_address[0],
+            "content_type": self.headers.get("Content-Type", ""),
+            "payload": payload,
+            "forward_text": text,
+            "target": {"private": self.cfg.private, "group": self.cfg.group},
+        }
 
         try:
-            results = send_text_to_napcat(self.cfg, text)
+            results, chunks = send_text_to_napcat(self.cfg, text)
+            record["chunks"] = chunks
+            record["chunks_count"] = len(chunks)
+            record["napcat"] = results
+            append_message_log(self.cfg, record)
+            eprint(json.dumps({"event": "message_forwarded", "path": parsed.path, "chunks": len(chunks), "remote_ip": self.client_address[0]}, ensure_ascii=False))
             self._send_json(200, {"ok": True, "chunks": len(results), "napcat": results})
         except Exception as exc:  # noqa: BLE001
+            record["error"] = str(exc)
+            append_message_log(self.cfg, record)
             eprint(f"[forward-error] {exc}")
             self._send_json(502, {"ok": False, "error": str(exc)})
 
@@ -378,6 +413,7 @@ def parse_args() -> Config:
     ap.add_argument("--title-prefix", default=os.getenv("TITLE_PREFIX", "📨"))
     ap.add_argument("--include-headers", action="store_true", default=os.getenv("INCLUDE_HEADERS", "1") not in {"0", "false", "False"})
     ap.add_argument("--rules-path", default=os.getenv("WEBHOOK_RULES_PATH", "/app/rules.json"), help="规则文件路径（JSON）；用于按配置决定不同 webhook 的转发内容")
+    ap.add_argument("--log-dir", default=os.getenv("WEBHOOK_LOG_DIR", "/logs"), help="消息日志目录；每次 webhook 转发会追加写入 JSONL")
     args = ap.parse_args()
 
     private_target = args.private if args.private is not None else (int(private_env) if private_env else None)
@@ -408,6 +444,7 @@ def parse_args() -> Config:
         title_prefix=args.title_prefix,
         include_headers=args.include_headers,
         rules_path=args.rules_path,
+        log_dir=args.log_dir,
     )
 
 
@@ -422,3 +459,7 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\nStopped.")
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

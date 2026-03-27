@@ -61,6 +61,18 @@ docker compose ps
 docker compose logs -f
 ```
 
+消息日志默认会额外落盘到宿主机：
+
+```text
+/opt/WebhookToNapcat/logs
+```
+
+容器内对应目录是：
+
+```text
+/logs
+```
+
 ### Docker run
 
 如果你不想改 compose，也可以直接一条命令启动：
@@ -105,6 +117,7 @@ docker run -d \
 | `NAPCAT_TIMEOUT` | 单次请求超时时间 |
 | `NAPCAT_RETRIES` | 重试次数 |
 | `WEBHOOK_RULES_PATH` | 规则文件路径，默认 `/app/rules.json` |
+| `WEBHOOK_LOG_DIR` | 消息日志目录，默认 `/logs`，按月写入 `messages-YYYY-MM.jsonl` |
 | `QQ_CHUNK_SIZE` | QQ 单条消息长度上限 |
 | `TITLE_PREFIX` | 转发消息标题前缀 |
 | `INCLUDE_HEADERS` | 是否附带部分请求头信息 |
