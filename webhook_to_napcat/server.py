@@ -335,15 +335,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path in {"/", self.cfg.path.rstrip("/") + "/health", "/health"}:
-            self._send_json(
-                200,
-                {
-                    "ok": True,
-                    "listen": f"{self.cfg.listen_host}:{self.cfg.listen_port}",
-                    "webhook_path": self.cfg.path,
-                    "target": {"private": self.cfg.private, "group": self.cfg.group},
-                },
-            )
+            self._send_json(200, {"ok": True, "status": "healthy"})
             return
         self._send_json(404, {"ok": False, "error": "not found"})
 
@@ -429,19 +421,7 @@ def main() -> int:
     server = ThreadingHTTPServer((cfg.listen_host, cfg.listen_port), WebhookHandler)
     server.cfg = cfg  # type: ignore[attr-defined]
 
-    print(
-        json.dumps(
-            {
-                "status": "listening",
-                "listen": f"{cfg.listen_host}:{cfg.listen_port}",
-                "path": cfg.path,
-                "target": {"private": cfg.private, "group": cfg.group},
-                "napcat_base_url": cfg.napcat_base_url,
-                "rules_path": cfg.rules_path,
-            },
-            ensure_ascii=False,
-        )
-    )
+    print(json.dumps({"status": "listening"}, ensure_ascii=False))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
