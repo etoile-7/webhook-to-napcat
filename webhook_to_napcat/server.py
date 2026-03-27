@@ -82,28 +82,23 @@ def split_for_qq(text: str, max_len: int) -> list[str]:
         return [text]
 
     chunks: list[str] = []
-    for block in text.split("\n\n"):
-        block = block.strip()
-        if not block:
-            continue
-        if len(block) <= max_len:
-            chunks.append(block)
-            continue
-        for line in block.splitlines():
-            line = line.rstrip()
-            if not line:
-                continue
-            if len(line) <= max_len:
-                chunks.append(line)
-                continue
-            start = 0
-            while start < len(line):
-                chunks.append(line[start : start + max_len])
-                start += max_len
+    start = 0
+    while start < len(text):
+        end = min(start + max_len, len(text))
+        if end < len(text):
+            split_at = text.rfind("\n", start, end)
+            if split_at <= start:
+                split_at = text.rfind(" ", start, end)
+            if split_at > start:
+                end = split_at
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        start = end
+        while start < len(text) and text[start] in {"\n", " ", "\t"}:
+            start += 1
 
-    if not chunks:
-        return [text[i : i + max_len] for i in range(0, len(text), max_len)]
-    return chunks
+    return chunks or [text[i : i + max_len] for i in range(0, len(text), max_len)]
 
 
 def send_text_to_napcat(cfg: Config, text: str) -> list[dict[str, Any]]:
