@@ -564,6 +564,39 @@ def get_file_name(path_value: Any) -> str | None:
 
 
 
+def parse_event_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+
+def get_bucket_display_time(bucket: AggregateBucket) -> str | None:
+    parsed_values: list[datetime] = []
+    raw_values: list[str] = []
+    for event in bucket.events.values():
+        payload = event.get("payload") if isinstance(event, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        raw = payload.get("EventTimestamp")
+        if isinstance(raw, str) and raw.strip():
+            raw_values.append(raw.strip())
+            parsed = parse_event_timestamp(raw)
+            if parsed is not None:
+                parsed_values.append(parsed)
+
+    if parsed_values:
+        chosen = min(parsed_values) if bucket.phase == "start" else max(parsed_values)
+        return chosen.strftime("%Y-%m-%d %H:%M:%S")
+    if raw_values:
+        return raw_values[0] if bucket.phase == "start" else raw_values[-1]
+    return None
+
+
+
 def build_bililive_message(cfg: Config, bucket: AggregateBucket) -> tuple[str | None, dict[str, Any]]:
     context = merge_bililive_context(bucket)
     event_types = sorted(bucket.events.keys())
@@ -591,24 +624,23 @@ def build_bililive_message(cfg: Config, bucket: AggregateBucket) -> tuple[str | 
         has_file = "FileOpening" in bucket.events
 
         if has_stream and has_session:
-            lines.append("🟢 开播并开始录制")
+            lines.append(f"🟢［{name}］开播啦！")
             if not cfg.notify_file_opening and has_file:
                 suppressed.append("FileOpening")
         elif has_stream:
-            lines.append("🟢 开播")
+            lines.append(f"🟢［{name}］开播啦！")
             if not cfg.notify_file_opening and has_file:
                 suppressed.append("FileOpening")
         elif has_session:
-            lines.append("🎬 开始录制")
+            lines.append(f"🎬［{name}］开始录制啦！")
             if not cfg.notify_file_opening and has_file:
                 suppressed.append("FileOpening")
         elif has_file and cfg.notify_file_opening:
-            lines.append("📝 开始写入录像文件")
+            lines.append(f"📝［{name}］开始写入录像文件")
         else:
             suppressed.extend(sorted(bucket.events.keys()))
             return None, meta
 
-        lines.append(f"主播：{name}")
         lines.append(f"标题：{stream_title}")
         if area_parent or area_child:
             if area_parent and area_child:
@@ -619,6 +651,8 @@ def build_bililive_message(cfg: Config, bucket: AggregateBucket) -> tuple[str | 
             lines.append(f"房间：{room_id}")
         if cfg.notify_file_opening and has_file and file_name:
             lines.append(f"文件：{truncate_middle(file_name, 84)}")
+        if display_time:
+            lines.append(f"时间：{display_time}")
         return "\n".join(lines).strip(), meta
 
     has_stream_end = "StreamEnded" in bucket.events
@@ -626,21 +660,20 @@ def build_bililive_message(cfg: Config, bucket: AggregateBucket) -> tuple[str | 
     has_file_closed = "FileClosed" in bucket.events
 
     if has_stream_end and has_file_closed:
-        lines.append("🔴 下播，录制完成")
+        lines.append(f"🔴［{name}］下播啦！")
     elif has_stream_end and has_session_end:
-        lines.append("🔴 下播，录制结束")
+        lines.append(f"🔴［{name}］下播啦！")
     elif has_file_closed and has_session_end:
-        lines.append("✅ 录制结束，文件完成")
+        lines.append(f"✅［{name}］录制结束啦！")
     elif has_file_closed:
-        lines.append("📦 文件完成")
+        lines.append(f"📦［{name}］文件完成")
     elif has_stream_end:
-        lines.append("🔴 下播")
+        lines.append(f"🔴［{name}］下播啦！")
     elif has_session_end:
-        lines.append("✅ 录制结束")
+        lines.append(f"✅［{name}］录制结束啦！")
     else:
         return None, meta
 
-    lines.append(f"主播：{name}")
     lines.append(f"标题：{stream_title}")
 
     stats: list[str] = []
@@ -655,6 +688,8 @@ def build_bililive_message(cfg: Config, bucket: AggregateBucket) -> tuple[str | 
 
     if has_file_closed and file_name:
         lines.append(f"文件：{truncate_middle(file_name, 84)}")
+    if display_time:
+        lines.append(f"时间：{display_time}")
 
     return "\n".join(lines).strip(), meta
 
