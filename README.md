@@ -35,6 +35,13 @@ environment:
   NAPCAT_TOKEN_MODE: "header"
   NAPCAT_PRIVATE_QQ: "YOUR_QQ_NUMBER"
   NAPCAT_GROUP_QQ: ""
+  WEBHOOK_LOG_DIR: "/logs"
+```
+
+```yaml
+volumes:
+  - "./rules.json:/app/rules.json:ro"
+  - "/opt/WebhookToNapcat/logs:/logs"
 ```
 
 至少改这两项：
@@ -73,6 +80,12 @@ docker compose logs -f
 /logs
 ```
 
+日志按分层写入：
+
+- `requests-YYYY-MM.jsonl`：所有入站 webhook 请求（包括 path 不匹配、secret 校验失败）
+- `messages-YYYY-MM.jsonl`：已接受并准备转发 / 已转发到 NapCat 的消息记录
+- `errors-YYYY-MM.jsonl`：鉴权失败、路由失败、NapCat 转发失败等错误记录
+
 ### Docker run
 
 如果你不想改 compose，也可以直接一条命令启动：
@@ -83,9 +96,11 @@ docker run -d \
   --restart unless-stopped \
   --add-host=host.docker.internal:host-gateway \
   -p 8787:8787 \
+  -v /opt/WebhookToNapcat/logs:/logs \
   -e LISTEN_HOST=0.0.0.0 \
   -e LISTEN_PORT=8787 \
   -e WEBHOOK_PATH=/webhook \
+  -e WEBHOOK_LOG_DIR=/logs \
   -e NAPCAT_BASE_URL=http://host.docker.internal:3001 \
   -e NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER \
   ghcr.io/etoile-7/webhook-to-napcat:latest
@@ -117,7 +132,7 @@ docker run -d \
 | `NAPCAT_TIMEOUT` | 单次请求超时时间 |
 | `NAPCAT_RETRIES` | 重试次数 |
 | `WEBHOOK_RULES_PATH` | 规则文件路径，默认 `/app/rules.json` |
-| `WEBHOOK_LOG_DIR` | 消息日志目录，默认 `/logs`，按月写入 `messages-YYYY-MM.jsonl` |
+| `WEBHOOK_LOG_DIR` | 消息日志目录，默认 `/logs`，按月分层写入 `requests-YYYY-MM.jsonl` / `messages-YYYY-MM.jsonl` / `errors-YYYY-MM.jsonl` |
 | `QQ_CHUNK_SIZE` | QQ 单条消息长度上限 |
 | `TITLE_PREFIX` | 转发消息标题前缀 |
 | `INCLUDE_HEADERS` | 是否附带部分请求头信息 |

@@ -15,13 +15,21 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+
+SENSITIVE_HEADERS = {"authorization", "x-webhook-secret", "proxy-authorization"}
 
 
 def eprint(*args: Any) -> None:
     print(*args, file=sys.stderr)
 
 
-def append_message_log(cfg: "Config", record: dict[str, Any]) -> None:
+def now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def append_jsonl(cfg: "Config", bucket: str, record: dict[str, Any]) -> None:
     if not cfg.log_dir:
         return
 
@@ -29,11 +37,23 @@ def append_message_log(cfg: "Config", record: dict[str, Any]) -> None:
         log_dir = Path(cfg.log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
         month = datetime.now().strftime("%Y-%m")
-        log_path = log_dir / f"messages-{month}.jsonl"
+        log_path = log_dir / f"{bucket}-{month}.jsonl"
         with log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as exc:  # noqa: BLE001
-        eprint(f"[message-log-error] {exc}")
+        eprint(f"[{bucket}-log-error] {exc}")
+
+
+def append_request_log(cfg: "Config", record: dict[str, Any]) -> None:
+    append_jsonl(cfg, "requests", record)
+
+
+def append_message_log(cfg: "Config", record: dict[str, Any]) -> None:
+    append_jsonl(cfg, "messages", record)
+
+
+def append_error_log(cfg: "Config", record: dict[str, Any]) -> None:
+    append_jsonl(cfg, "errors", record)
 
 
 @dataclass
@@ -302,9 +322,10 @@ def build_forward_text(cfg: Config, handler: BaseHTTPRequestHandler, payload: An
     if rules_text:
         return rules_text
 
+    parsed = urllib.parse.urlparse(handler.path)
     title = f"{cfg.title_prefix} 收到新 webhook"
     lines = [title]
-    lines.append(f"路径: {handler.path}")
+    lines.append(f"路径: {parsed.path}")
     lines.append(f"来源IP: {handler.client_address[0]}")
     if cfg.include_headers:
         event = handler.headers.get("X-GitHub-Event") or handler.headers.get("X-Gitlab-Event") or handler.headers.get("X-Event-Key")
@@ -318,18 +339,83 @@ def build_forward_text(cfg: Config, handler: BaseHTTPRequestHandler, payload: An
     return "\n".join(lines).strip()
 
 
-def verify_secret(cfg: Config, handler: BaseHTTPRequestHandler) -> bool:
-    if not cfg.secret:
-        return True
+def redact_header(name: str, value: str) -> str:
+    if name.lower() in SENSITIVE_HEADERS:
+        return "<redacted>"
+    return value
+
+
+def get_sanitized_headers(handler: BaseHTTPRequestHandler) -> dict[str, str]:
+    return {key: redact_header(key, value) for key, value in handler.headers.items()}
+
+
+def get_payload_summary(payload: Any, max_len: int = 500) -> str:
+    text = summarize_payload(payload)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
+def evaluate_secret(cfg: Config, handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     query = urllib.parse.urlparse(handler.path).query
     params = urllib.parse.parse_qs(query)
     from_query = params.get("secret", [""])[0]
     from_header = handler.headers.get("X-Webhook-Secret", "")
-    return cfg.secret in {from_query, from_header}
+
+    if not cfg.secret:
+        return {
+            "required": False,
+            "provided_via_query": bool(from_query),
+            "provided_via_header": bool(from_header),
+            "status": "not_configured",
+            "reason": "secret_not_configured",
+        }
+
+    if cfg.secret in {from_query, from_header}:
+        return {
+            "required": True,
+            "provided_via_query": bool(from_query),
+            "provided_via_header": bool(from_header),
+            "status": "passed",
+            "reason": "matched",
+        }
+
+    return {
+        "required": True,
+        "provided_via_query": bool(from_query),
+        "provided_via_header": bool(from_header),
+        "status": "failed",
+        "reason": "invalid_secret",
+    }
+
+
+def build_request_record(handler: BaseHTTPRequestHandler, cfg: Config, request_id: str, parsed: urllib.parse.ParseResult, payload: Any, auth: dict[str, Any], outcome: str, note: str | None = None) -> dict[str, Any]:
+    query_keys = sorted(set(urllib.parse.parse_qs(parsed.query).keys()))
+    return {
+        "ts": now_iso(),
+        "request_id": request_id,
+        "layer": "request",
+        "stage": "ingress",
+        "outcome": outcome,
+        "note": note,
+        "request": {
+            "method": handler.command,
+            "path": parsed.path,
+            "query_keys": query_keys,
+            "remote_ip": handler.client_address[0],
+            "content_type": handler.headers.get("Content-Type", ""),
+            "content_length": int(handler.headers.get("Content-Length", "0") or "0"),
+            "headers": get_sanitized_headers(handler),
+            "payload": payload,
+            "payload_summary": get_payload_summary(payload),
+        },
+        "auth": auth,
+        "target": {"private": cfg.private, "group": cfg.group},
+    }
 
 
 class WebhookHandler(BaseHTTPRequestHandler):
-    server_version = "WebhookToNapCat/1.0"
+    server_version = "WebhookToNapCat/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         eprint("[http]", self.address_string(), "-", fmt % args)
@@ -354,41 +440,139 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
+        request_id = uuid4().hex
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path.rstrip("/") != self.cfg.path.rstrip("/"):
-            self._send_json(404, {"ok": False, "error": "path not matched"})
-            return
-        if not verify_secret(self.cfg, self):
-            self._send_json(401, {"ok": False, "error": "invalid secret"})
-            return
-
         length = int(self.headers.get("Content-Length", "0") or "0")
         raw = self.rfile.read(length)
         payload = parse_body(self.headers.get("Content-Type", ""), raw)
+        auth = evaluate_secret(self.cfg, self)
+
+        if parsed.path.rstrip("/") != self.cfg.path.rstrip("/"):
+            request_record = build_request_record(
+                self,
+                self.cfg,
+                request_id,
+                parsed,
+                payload,
+                auth,
+                outcome="path_not_matched",
+                note="received POST on unmatched path",
+            )
+            append_request_log(self.cfg, request_record)
+            append_error_log(
+                self.cfg,
+                {
+                    "ts": now_iso(),
+                    "request_id": request_id,
+                    "layer": "error",
+                    "stage": "routing",
+                    "error_type": "path_not_matched",
+                    "error": "path not matched",
+                    "request": request_record["request"],
+                    "auth": auth,
+                },
+            )
+            self._send_json(404, {"ok": False, "error": "path not matched", "request_id": request_id})
+            return
+
+        if auth["status"] == "failed":
+            request_record = build_request_record(
+                self,
+                self.cfg,
+                request_id,
+                parsed,
+                payload,
+                auth,
+                outcome="rejected",
+                note="webhook secret validation failed",
+            )
+            append_request_log(self.cfg, request_record)
+            append_error_log(
+                self.cfg,
+                {
+                    "ts": now_iso(),
+                    "request_id": request_id,
+                    "layer": "error",
+                    "stage": "auth",
+                    "error_type": "invalid_secret",
+                    "error": "invalid secret",
+                    "request": request_record["request"],
+                    "auth": auth,
+                },
+            )
+            eprint(json.dumps({"event": "webhook_rejected", "reason": "invalid_secret", "request_id": request_id, "remote_ip": self.client_address[0]}, ensure_ascii=False))
+            self._send_json(401, {"ok": False, "error": "invalid secret", "request_id": request_id})
+            return
+
+        request_record = build_request_record(
+            self,
+            self.cfg,
+            request_id,
+            parsed,
+            payload,
+            auth,
+            outcome="accepted",
+            note="webhook accepted for forwarding",
+        )
+        append_request_log(self.cfg, request_record)
+
         text = build_forward_text(self.cfg, self, payload)
-        record: dict[str, Any] = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "path": parsed.path,
-            "remote_ip": self.client_address[0],
-            "content_type": self.headers.get("Content-Type", ""),
-            "payload": payload,
+        message_record: dict[str, Any] = {
+            "ts": now_iso(),
+            "request_id": request_id,
+            "layer": "message",
+            "stage": "egress",
+            "outcome": "forwarding",
+            "request": {
+                "path": parsed.path,
+                "remote_ip": self.client_address[0],
+            },
+            "auth": auth,
+            "payload_summary": request_record["request"]["payload_summary"],
             "forward_text": text,
             "target": {"private": self.cfg.private, "group": self.cfg.group},
         }
 
         try:
             results, chunks = send_text_to_napcat(self.cfg, text)
-            record["chunks"] = chunks
-            record["chunks_count"] = len(chunks)
-            record["napcat"] = results
-            append_message_log(self.cfg, record)
-            eprint(json.dumps({"event": "message_forwarded", "path": parsed.path, "chunks": len(chunks), "remote_ip": self.client_address[0]}, ensure_ascii=False))
-            self._send_json(200, {"ok": True, "chunks": len(results), "napcat": results})
+            message_record["outcome"] = "forwarded"
+            message_record["chunks"] = chunks
+            message_record["chunks_count"] = len(chunks)
+            message_record["napcat"] = results
+            append_message_log(self.cfg, message_record)
+            eprint(
+                json.dumps(
+                    {
+                        "event": "message_forwarded",
+                        "path": parsed.path,
+                        "chunks": len(chunks),
+                        "remote_ip": self.client_address[0],
+                        "request_id": request_id,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            self._send_json(200, {"ok": True, "chunks": len(results), "napcat": results, "request_id": request_id})
         except Exception as exc:  # noqa: BLE001
-            record["error"] = str(exc)
-            append_message_log(self.cfg, record)
-            eprint(f"[forward-error] {exc}")
-            self._send_json(502, {"ok": False, "error": str(exc)})
+            message_record["outcome"] = "failed"
+            message_record["error"] = str(exc)
+            append_message_log(self.cfg, message_record)
+            append_error_log(
+                self.cfg,
+                {
+                    "ts": now_iso(),
+                    "request_id": request_id,
+                    "layer": "error",
+                    "stage": "egress",
+                    "error_type": "forward_failed",
+                    "error": str(exc),
+                    "request": request_record["request"],
+                    "auth": auth,
+                    "target": message_record["target"],
+                },
+            )
+            eprint(f"[forward-error] request_id={request_id} {exc}")
+            self._send_json(502, {"ok": False, "error": str(exc), "request_id": request_id})
 
 
 def parse_args() -> Config:
@@ -413,7 +597,7 @@ def parse_args() -> Config:
     ap.add_argument("--title-prefix", default=os.getenv("TITLE_PREFIX", "📨"))
     ap.add_argument("--include-headers", action="store_true", default=os.getenv("INCLUDE_HEADERS", "1") not in {"0", "false", "False"})
     ap.add_argument("--rules-path", default=os.getenv("WEBHOOK_RULES_PATH", "/app/rules.json"), help="规则文件路径（JSON）；用于按配置决定不同 webhook 的转发内容")
-    ap.add_argument("--log-dir", default=os.getenv("WEBHOOK_LOG_DIR", "/logs"), help="消息日志目录；每次 webhook 转发会追加写入 JSONL")
+    ap.add_argument("--log-dir", default=os.getenv("WEBHOOK_LOG_DIR", "/logs"), help="消息日志目录；按 requests/messages/errors 三层写入 JSONL")
     args = ap.parse_args()
 
     private_target = args.private if args.private is not None else (int(private_env) if private_env else None)
