@@ -140,9 +140,105 @@ def post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeou
 
 
 
-def build_napcat_request(cfg: Config) -> tuple[str, dict[str, str], str]:
+def default_target_specs(cfg: Config) -> list[dict[str, int]]:
+    targets: list[dict[str, int]] = []
+    if cfg.private is not None:
+        targets.append({"private": int(cfg.private)})
+    if cfg.group is not None:
+        targets.append({"group": int(cfg.group)})
+    return targets
+
+
+
+def normalize_target_spec(spec: Any, context: dict[str, Any] | None = None) -> dict[str, int] | None:
+    if isinstance(spec, str):
+        raw = spec.strip()
+        if not raw:
+            return None
+        if context:
+            try:
+                raw = raw.format(**context)
+            except Exception:  # noqa: BLE001
+                pass
+        lower = raw.lower()
+        if lower == "default":
+            return {"default": 1}
+        if raw.startswith("private:"):
+            value = raw.split(":", 1)[1].strip()
+            return {"private": int(value)} if value else None
+        if raw.startswith("group:"):
+            value = raw.split(":", 1)[1].strip()
+            return {"group": int(value)} if value else None
+        return None
+
+    if isinstance(spec, dict):
+        if spec.get("default") is True:
+            return {"default": 1}
+        if "private" in spec and spec.get("private") not in {None, ""}:
+            value = spec.get("private")
+            if isinstance(value, str) and context:
+                try:
+                    value = value.format(**context)
+                except Exception:  # noqa: BLE001
+                    pass
+            return {"private": int(value)}
+        if "group" in spec and spec.get("group") not in {None, ""}:
+            value = spec.get("group")
+            if isinstance(value, str) and context:
+                try:
+                    value = value.format(**context)
+                except Exception:  # noqa: BLE001
+                    pass
+            return {"group": int(value)}
+
+    return None
+
+
+
+def resolve_target_specs(cfg: Config, raw_targets: Any = None, context: dict[str, Any] | None = None) -> list[dict[str, int]]:
+    items = raw_targets if isinstance(raw_targets, list) else ([raw_targets] if raw_targets is not None else [])
+    resolved: list[dict[str, int]] = []
+
+    if not items:
+        resolved = default_target_specs(cfg)
+    else:
+        for item in items:
+            normalized = normalize_target_spec(item, context=context)
+            if not normalized:
+                continue
+            if "default" in normalized:
+                resolved.extend(default_target_specs(cfg))
+                continue
+            resolved.append(normalized)
+
+    deduped: list[dict[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for target in resolved:
+        if "private" in target:
+            key = ("private", int(target["private"]))
+            payload = {"private": int(target["private"])}
+        elif "group" in target:
+            key = ("group", int(target["group"]))
+            payload = {"group": int(target["group"])}
+        else:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(payload)
+
+    return deduped
+
+
+
+def build_napcat_request(cfg: Config, target: dict[str, int]) -> tuple[str, dict[str, str], str, dict[str, int]]:
     base_url = cfg.napcat_base_url.rstrip("/")
-    endpoint = "/send_private_msg" if cfg.private is not None else "/send_group_msg"
+    if "private" in target:
+        endpoint = "/send_private_msg"
+        target_payload = {"user_id": int(target["private"])}
+    else:
+        endpoint = "/send_group_msg"
+        target_payload = {"group_id": int(target["group"])}
     headers: dict[str, str] = {}
     token_q = ""
 
@@ -152,7 +248,7 @@ def build_napcat_request(cfg: Config) -> tuple[str, dict[str, str], str]:
         else:
             token_q = ("&" if "?" in base_url else "?") + "access_token=" + urllib.parse.quote(cfg.napcat_token)
 
-    return base_url + endpoint + token_q, headers, endpoint
+    return base_url + endpoint + token_q, headers, endpoint, target_payload
 
 
 
@@ -184,17 +280,21 @@ def split_for_qq(text: str, max_len: int) -> list[str]:
 
 
 
-def send_text_to_napcat(cfg: Config, text: str) -> tuple[list[dict[str, Any]], list[str]]:
-    url, headers, _ = build_napcat_request(cfg)
-    target_payload = {"user_id": cfg.private} if cfg.private is not None else {"group_id": cfg.group}
+def send_text_to_napcat(cfg: Config, text: str, targets: list[dict[str, int]] | None = None) -> tuple[list[dict[str, Any]], list[str], list[dict[str, int]]]:
+    resolved_targets = targets or default_target_specs(cfg)
+    if not resolved_targets:
+        raise RuntimeError("no NapCat targets resolved")
 
-    results = []
+    results: list[dict[str, Any]] = []
     chunks = split_for_qq(text, cfg.chunk_size)
-    for chunk in chunks:
-        payload = dict(target_payload)
-        payload["message"] = [{"type": "text", "data": {"text": chunk}}]
-        results.append(post_json(url, payload, headers=headers, timeout=cfg.timeout, retries=cfg.retries))
-    return results, chunks
+    for target in resolved_targets:
+        url, headers, _, target_payload = build_napcat_request(cfg, target)
+        for chunk in chunks:
+            payload = dict(target_payload)
+            payload["message"] = [{"type": "text", "data": {"text": chunk}}]
+            response = post_json(url, payload, headers=headers, timeout=cfg.timeout, retries=cfg.retries)
+            results.append({"target": target, "response": response})
+    return results, chunks, resolved_targets
 
 
 
@@ -363,7 +463,21 @@ def render_rule_output(rule: dict[str, Any], payload: Any) -> str | None:
 
 
 
-def apply_rules(cfg: Config, handler: BaseHTTPRequestHandler, payload: Any) -> str | None:
+def get_rule_targets_spec(rule: dict[str, Any]) -> Any:
+    output = rule.get("output") if isinstance(rule.get("output"), dict) else {}
+    if isinstance(output, dict) and output.get("targets") is not None:
+        return output.get("targets")
+    if isinstance(output, dict) and output.get("target") is not None:
+        return output.get("target")
+    if rule.get("targets") is not None:
+        return rule.get("targets")
+    if rule.get("target") is not None:
+        return rule.get("target")
+    return None
+
+
+
+def apply_rules(cfg: Config, handler: BaseHTTPRequestHandler, payload: Any) -> tuple[str | None, list[dict[str, int]] | None]:
     rules_doc = load_rules(cfg.rules_path)
     rules = rules_doc.get("rules")
     if isinstance(rules, list):
@@ -373,22 +487,25 @@ def apply_rules(cfg: Config, handler: BaseHTTPRequestHandler, payload: Any) -> s
             if rule_matches(rule, handler, payload):
                 rendered = render_rule_output(rule, payload)
                 if rendered:
-                    return rendered
+                    return rendered, resolve_target_specs(cfg, get_rule_targets_spec(rule), context=payload if isinstance(payload, dict) else None)
 
     default_rule = rules_doc.get("default")
     if isinstance(default_rule, dict):
         rendered = render_rule_output({"output": default_rule}, payload)
         if rendered:
-            return rendered
+            target_spec = default_rule.get("targets") if isinstance(default_rule, dict) else None
+            if target_spec is None and isinstance(default_rule, dict):
+                target_spec = default_rule.get("target")
+            return rendered, resolve_target_specs(cfg, target_spec, context=payload if isinstance(payload, dict) else None)
 
-    return None
+    return None, None
 
 
 
-def build_forward_text(cfg: Config, handler: BaseHTTPRequestHandler, payload: Any) -> str:
-    rules_text = apply_rules(cfg, handler, payload)
+def build_forward_text(cfg: Config, handler: BaseHTTPRequestHandler, payload: Any) -> tuple[str, list[dict[str, int]]]:
+    rules_text, rule_targets = apply_rules(cfg, handler, payload)
     if rules_text:
-        return rules_text
+        return rules_text, (rule_targets or default_target_specs(cfg))
 
     parsed = urllib.parse.urlparse(handler.path)
     title = f"{cfg.title_prefix} 收到新 webhook"
@@ -404,7 +521,7 @@ def build_forward_text(cfg: Config, handler: BaseHTTPRequestHandler, payload: An
             lines.append(f"UA: {ua}")
     lines.append("")
     lines.append(summarize_payload(payload))
-    return "\n".join(lines).strip()
+    return "\n".join(lines).strip(), default_target_specs(cfg)
 
 
 
@@ -1032,7 +1149,21 @@ def aggregate_output_matches(rule: dict[str, Any], context: dict[str, Any], even
 
 
 
-def select_aggregate_output(bucket: AggregateBucket, context: dict[str, Any]) -> tuple[str | None, list[str]]:
+def get_output_targets_spec(rule: dict[str, Any], output: dict[str, Any] | None = None) -> Any:
+    output = output if isinstance(output, dict) else (rule.get("output") if isinstance(rule.get("output"), dict) else {})
+    if isinstance(output, dict) and output.get("targets") is not None:
+        return output.get("targets")
+    if isinstance(output, dict) and output.get("target") is not None:
+        return output.get("target")
+    if rule.get("targets") is not None:
+        return rule.get("targets")
+    if rule.get("target") is not None:
+        return rule.get("target")
+    return None
+
+
+
+def select_aggregate_output(bucket: AggregateBucket, context: dict[str, Any]) -> tuple[str | None, list[str], Any]:
     group = bucket.group_config
     outputs = group.get("outputs")
     event_types = set(bucket.events.keys())
@@ -1049,15 +1180,15 @@ def select_aggregate_output(bucket: AggregateBucket, context: dict[str, Any]) ->
                 continue
             rendered = render_output_spec(output, context)
             if rendered:
-                return rendered, suppress_event_types
+                return rendered, suppress_event_types, get_output_targets_spec(item, output)
 
     output = group.get("output")
     if isinstance(output, dict):
         rendered = render_output_spec(output, context)
         if rendered:
-            return rendered, suppress_event_types
+            return rendered, suppress_event_types, get_output_targets_spec(group, output)
 
-    return None, suppress_event_types
+    return None, suppress_event_types, None
 
 
 
@@ -1113,7 +1244,7 @@ def get_aggregate_group(cfg: Config, handler: BaseHTTPRequestHandler, payload: d
 
 def build_aggregate_message(bucket: AggregateBucket) -> tuple[str | None, dict[str, Any]]:
     context = build_aggregate_context(bucket)
-    text, suppressed = select_aggregate_output(bucket, context)
+    text, suppressed, targets_spec = select_aggregate_output(bucket, context)
     meta: dict[str, Any] = {
         "enabled": True,
         "group_name": bucket.group_name,
@@ -1122,6 +1253,7 @@ def build_aggregate_message(bucket: AggregateBucket) -> tuple[str | None, dict[s
         "event_types": sorted(bucket.events.keys()),
         "suppressed": suppressed,
         "context": context,
+        "targets_spec": targets_spec,
     }
     return text, meta
 
@@ -1165,6 +1297,8 @@ def build_aggregate_message_record(bucket: AggregateBucket, aggregate_meta: dict
 def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info: dict[str, Any] | None = None) -> None:
     text, aggregate_meta = build_aggregate_message(bucket)
     message_record = build_aggregate_message_record(bucket, aggregate_meta)
+    targets = resolve_target_specs(cfg, aggregate_meta.get("targets_spec"), context=aggregate_meta.get("context") if isinstance(aggregate_meta.get("context"), dict) else None)
+    message_record["target"] = targets
 
     if not text:
         message_record["outcome"] = "suppressed"
@@ -1179,10 +1313,13 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info
         message_record["debounce"] = debounce_info
 
     try:
-        results, chunks = send_text_to_napcat(cfg, text)
+        results, chunks, resolved_targets = send_text_to_napcat(cfg, text, targets=targets)
         message_record["outcome"] = "forwarded"
         message_record["chunks"] = chunks
         message_record["chunks_count"] = len(chunks)
+        message_record["target_count"] = len(resolved_targets)
+        message_record["delivery_count"] = len(results)
+        message_record["target"] = resolved_targets
         message_record["napcat"] = results
         append_message_log(cfg, message_record)
         eprint(
@@ -1194,6 +1331,8 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info
                     "phase": bucket.phase,
                     "event_types": aggregate_meta["event_types"],
                     "chunks": len(chunks),
+                    "targets": len(resolved_targets),
+                    "deliveries": len(results),
                     "request_ids": bucket.request_ids,
                 },
                 ensure_ascii=False,
@@ -1215,7 +1354,7 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info
                 "error": str(exc),
                 "request": message_record["request"],
                 "auth": bucket.auth,
-                "target": bucket.target,
+                "target": message_record["target"],
                 "aggregate": aggregate_meta,
             },
         )
@@ -1582,7 +1721,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "queued": True, "aggregate": aggregate_meta, "request_id": request_id})
                 return
 
-        text = build_forward_text(self.cfg, self, payload)
+        text, targets = build_forward_text(self.cfg, self, payload)
         message_record: dict[str, Any] = {
             "ts": now_iso(),
             "request_id": request_id,
@@ -1596,14 +1735,17 @@ class WebhookHandler(BaseHTTPRequestHandler):
             "auth": auth,
             "payload_summary": request_record["request"]["payload_summary"],
             "forward_text": text,
-            "target": {"private": self.cfg.private, "group": self.cfg.group},
+            "target": targets,
         }
 
         try:
-            results, chunks = send_text_to_napcat(self.cfg, text)
+            results, chunks, resolved_targets = send_text_to_napcat(self.cfg, text, targets=targets)
             message_record["outcome"] = "forwarded"
             message_record["chunks"] = chunks
             message_record["chunks_count"] = len(chunks)
+            message_record["target_count"] = len(resolved_targets)
+            message_record["delivery_count"] = len(results)
+            message_record["target"] = resolved_targets
             message_record["napcat"] = results
             append_message_log(self.cfg, message_record)
             eprint(
@@ -1612,13 +1754,15 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         "event": "message_forwarded",
                         "path": parsed.path,
                         "chunks": len(chunks),
+                        "targets": len(resolved_targets),
+                        "deliveries": len(results),
                         "remote_ip": self.client_address[0],
                         "request_id": request_id,
                     },
                     ensure_ascii=False,
                 )
             )
-            self._send_json(200, {"ok": True, "chunks": len(results), "napcat": results, "request_id": request_id})
+            self._send_json(200, {"ok": True, "chunks": len(chunks), "targets": len(resolved_targets), "deliveries": len(results), "napcat": results, "request_id": request_id})
         except Exception as exc:  # noqa: BLE001
             message_record["outcome"] = "failed"
             message_record["error"] = str(exc)
@@ -1673,10 +1817,7 @@ def parse_args() -> Config:
     private_target = args.private if args.private is not None else (int(private_env) if private_env else None)
     group_target = args.group if args.group is not None else (int(group_env) if group_env else None)
 
-    if private_target is not None and group_target is not None:
-        ap.error("请只设置一个目标：--private / NAPCAT_PRIVATE_QQ 与 --group / NAPCAT_GROUP_QQ 二选一，不要同时填写")
-    if private_target is None and group_target is None:
-        ap.error("必须设置一个目标：请提供 --private 或 --group，或设置环境变量 NAPCAT_PRIVATE_QQ / NAPCAT_GROUP_QQ（私聊和群聊二选一）")
+    # 允许同时配置默认私聊 + 默认群聊；若两者都不填，则需要依赖 rules.json 中的 per-rule / per-output targets。
 
     path = args.path.strip() or "/webhook"
     if not path.startswith("/"):

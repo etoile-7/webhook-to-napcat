@@ -47,7 +47,9 @@ volumes:
 至少改这两项：
 
 - `NAPCAT_BASE_URL`
-- `NAPCAT_PRIVATE_QQ` 或 `NAPCAT_GROUP_QQ`
+- 默认目标（可选其一，也可两者都配）：`NAPCAT_PRIVATE_QQ` / `NAPCAT_GROUP_QQ`
+
+如果你准备把目标完全写进 `rules.json` / 聚合模板里，也可以两个默认目标都不配。
 
 然后启动：
 
@@ -127,8 +129,8 @@ docker run -d \
 | `NAPCAT_BASE_URL` | NapCat HTTP 地址，默认 `http://host.docker.internal:3001` |
 | `NAPCAT_TOKEN` | 可选 NapCat 访问令牌 |
 | `NAPCAT_TOKEN_MODE` | `header` 或 `query` |
-| `NAPCAT_PRIVATE_QQ` | 目标 QQ 私聊用户 ID |
-| `NAPCAT_GROUP_QQ` | 目标 QQ 群号 |
+| `NAPCAT_PRIVATE_QQ` | 默认 QQ 私聊用户 ID（可与群号同时配置） |
+| `NAPCAT_GROUP_QQ` | 默认 QQ 群号（可与私聊同时配置） |
 | `NAPCAT_TIMEOUT` | 单次请求超时时间 |
 | `NAPCAT_RETRIES` | 重试次数 |
 | `WEBHOOK_RULES_PATH` | 规则文件路径，默认 `/app/rules.json` |
@@ -315,6 +317,71 @@ image: ghcr.io/etoile-7/webhook-to-napcat:latest
 - `field_in`
 
 这样以后改“开播啦 / 下播啦 / 时间放哪 / 哪几类事件合并 / 哪些事件 suppress”，都主要改本地 `rules.json`，不用再改 Python 源码。
+
+### 在模板里指定推送目标（支持多目标 / 按直播间路由）
+
+现在普通 `rules[*]` 和聚合模板 `aggregate.groups[*].outputs[*]` / `aggregate.groups[*].output` 都支持直接写目标：
+
+- `target`：单个目标
+- `targets`：多个目标
+- 目标格式支持：
+  - `{ "private": 123456 }`
+  - `{ "group": 987654 }`
+  - `"private:123456"`
+  - `"group:987654"`
+  - `"default"`（把默认环境变量目标也一起带上）
+
+示例：只把 **贝拉kira** 的开播消息同时推到“默认私聊 + 指定群聊”，其他直播间仍走默认目标：
+
+```json
+{
+  "aggregate": {
+    "enabled": true,
+    "groups": [
+      {
+        "name": "bililive_start",
+        "phase": "start",
+        "match": {
+          "field_in": {
+            "EventType": ["StreamStarted", "SessionStarted", "FileOpening"]
+          }
+        },
+        "key_fields": ["EventData.RoomId", "EventData.Name"],
+        "outputs": [
+          {
+            "match": {
+              "event_types_all": ["StreamStarted", "SessionStarted"],
+              "field_equals": { "room_id": 22632424 }
+            },
+            "output": {
+              "type": "template",
+              "template": "🟢［{name}］开播啦！\n标题：{title}\n房间：{room_id}\n时间：{time}",
+              "targets": [
+                "default",
+                { "group": 123456789 }
+              ]
+            }
+          },
+          {
+            "match": { "event_types_all": ["StreamStarted", "SessionStarted"] },
+            "output": {
+              "type": "template",
+              "template": "🟢［{name}］开播啦！\n标题：{title}\n房间：{room_id}\n时间：{time}"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+这样可以做到：
+
+- 默认都发给自己的私聊
+- 指定直播间额外同步到某个群
+- 或者某个输出只发群、不发私聊
+- 同一条消息同时发多个目标
 
 ## 测试 webhook
 
