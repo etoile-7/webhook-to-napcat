@@ -238,6 +238,84 @@ image: ghcr.io/etoile-7/webhook-to-napcat:latest
 - 改成宿主机实际 IP
 - 或保留 compose 里的：`host.docker.internal:host-gateway`
 
+## 聚合规则（模板驱动）
+
+除了普通 `rules` 外，`rules.json` 还可以定义 `aggregate`，把“是否聚合 / 聚合键 / 聚合窗口 / suppress 哪些事件 / 命中哪条输出模板”都放进模板配置里。
+
+一个最小示例：
+
+```json
+{
+  "aggregate": {
+    "enabled": true,
+    "window_ms": 3000,
+    "groups": [
+      {
+        "name": "bililive_start",
+        "phase": "start",
+        "match": {
+          "field_in": {
+            "EventType": ["StreamStarted", "SessionStarted", "FileOpening"]
+          }
+        },
+        "key_fields": ["EventData.RoomId", "EventData.Name"],
+        "event_order": ["StreamStarted", "SessionStarted", "FileOpening"],
+        "suppress_event_types": ["FileOpening"],
+        "outputs": [
+          {
+            "match": { "event_types_all": ["StreamStarted", "SessionStarted"] },
+            "output": {
+              "type": "template",
+              "template": "🟢［{name}］开播啦！\\n标题：{title}\\n分区：{area}\\n房间：{room_id}\\n时间：{time}"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+目前聚合模板可用的上下文字段包括：
+
+- `name`
+- `title`
+- `room_id`
+- `short_id`
+- `session_id`
+- `area_parent`
+- `area_child`
+- `area`
+- `file_path`
+- `file_name`
+- `duration`
+- `file_size`
+- `time`
+- `phase`
+- `group_name`
+- `event_types`
+- `request_count`
+- `event_count`
+
+聚合组里常用字段：
+
+- `match`：哪些 webhook 进入这个聚合组（支持 `field_equals` / `field_in` / `has_keys` / `field_exists`）
+- `key_fields`：按哪些字段决定“是不是同一组消息”
+- `window_ms`：这个组自己的聚合窗口
+- `event_order`：聚合上下文取值时的事件优先级
+- `suppress_event_types`：只参与聚合但不单独体现为通知的事件
+- `outputs`：按已收集到的 `event_types_*` 规则选择最终模板
+
+`outputs[*].match` 目前支持：
+
+- `event_types_all`
+- `event_types_any`
+- `event_types_none`
+- `field_equals`
+- `field_in`
+
+这样以后改“开播啦 / 下播啦 / 时间放哪 / 哪几类事件合并 / 哪些事件 suppress”，都主要改本地 `rules.json`，不用再改 Python 源码。
+
 ## 测试 webhook
 
 ```bash

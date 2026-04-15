@@ -20,9 +20,6 @@ from uuid import uuid4
 
 
 SENSITIVE_HEADERS = {"authorization", "x-webhook-secret", "proxy-authorization"}
-BILILIVE_START_TYPES = {"StreamStarted", "SessionStarted", "FileOpening"}
-BILILIVE_END_TYPES = {"FileClosed", "SessionEnded", "StreamEnded"}
-BILILIVE_ALL_TYPES = BILILIVE_START_TYPES | BILILIVE_END_TYPES
 AGGREGATE_LOCK = threading.Lock()
 AGGREGATE_BUCKETS: dict[str, "AggregateBucket"] = {}
 
@@ -53,6 +50,8 @@ class Config:
 class AggregateBucket:
     key: str
     phase: str
+    group_name: str
+    group_config: dict[str, Any]
     created_at: float
     request_path: str
     remote_ip: str
@@ -283,6 +282,12 @@ def rule_matches(rule: dict[str, Any], handler: BaseHTTPRequestHandler, payload:
             if key not in payload:
                 return False
 
+    field_exists = match.get("field_exists")
+    if isinstance(field_exists, list):
+        for key in field_exists:
+            if get_field_value(payload, str(key)) in {None, ""}:
+                return False
+
     path_contains = match.get("path_contains")
     if path_contains and path_contains not in handler.path:
         return False
@@ -297,6 +302,13 @@ def rule_matches(rule: dict[str, Any], handler: BaseHTTPRequestHandler, payload:
     if isinstance(field_equals, dict):
         for key, expected in field_equals.items():
             if get_field_value(payload, key) != expected:
+                return False
+
+    field_in = match.get("field_in")
+    if isinstance(field_in, dict):
+        for key, expected_values in field_in.items():
+            values = expected_values if isinstance(expected_values, list) else [expected_values]
+            if get_field_value(payload, key) not in values:
                 return False
 
     return True
@@ -462,55 +474,8 @@ def build_request_record(handler: BaseHTTPRequestHandler, cfg: Config, request_i
 
 
 
-def is_bililive_event(payload: Any) -> bool:
-    return isinstance(payload, dict) and isinstance(payload.get("EventType"), str) and isinstance(payload.get("EventData"), dict)
-
-
-
-def get_bililive_phase(payload: dict[str, Any]) -> str | None:
-    event_type = payload.get("EventType")
-    if event_type in BILILIVE_START_TYPES:
-        return "start"
-    if event_type in BILILIVE_END_TYPES:
-        return "end"
-    return None
-
-
-
-def get_bililive_group_key(payload: dict[str, Any], phase: str) -> str:
-    data = payload.get("EventData") or {}
-    room_id = data.get("RoomId") or "unknown-room"
-    name = str(data.get("Name") or "unknown-name").strip() or "unknown-name"
-    return f"bililive:{phase}:{room_id}:{name}"
-
-
-
-def get_event_data(payload: dict[str, Any]) -> dict[str, Any]:
-    data = payload.get("EventData")
-    return data if isinstance(data, dict) else {}
-
-
-
-def merge_bililive_context(bucket: AggregateBucket) -> dict[str, Any]:
-    context: dict[str, Any] = {}
-    ordered_types = [
-        "StreamStarted",
-        "SessionStarted",
-        "FileOpening",
-        "FileClosed",
-        "SessionEnded",
-        "StreamEnded",
-    ]
-    for event_type in ordered_types:
-        event = bucket.events.get(event_type)
-        if not event:
-            continue
-        data = get_event_data(event["payload"])
-        for key, value in data.items():
-            if value in {None, ""}:
-                continue
-            context[key] = value
-    return context
+def is_aggregate_candidate(payload: Any) -> bool:
+    return isinstance(payload, dict)
 
 
 
@@ -564,6 +529,37 @@ def get_file_name(path_value: Any) -> str | None:
 
 
 
+def get_bucket_field_value(bucket: AggregateBucket, field: str) -> Any:
+    event_order = bucket.group_config.get("event_order")
+    ordered_types: list[str] = []
+    if isinstance(event_order, list):
+        ordered_types.extend(str(item) for item in event_order)
+    for event_type in bucket.events.keys():
+        if event_type not in ordered_types:
+            ordered_types.append(event_type)
+
+    chosen = None
+    for event_type in ordered_types:
+        event = bucket.events.get(event_type)
+        if not isinstance(event, dict):
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        value = get_field_value(payload, field)
+        if value not in {None, ""}:
+            chosen = value
+    return chosen
+
+
+
+def truncate_value(value: Any, max_len: int) -> Any:
+    if not isinstance(value, str):
+        return value
+    return truncate_middle(value, max_len=max_len)
+
+
+
 def parse_event_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -574,10 +570,19 @@ def parse_event_timestamp(value: Any) -> datetime | None:
 
 
 
-def get_bucket_display_time(bucket: AggregateBucket) -> str | None:
+def get_bucket_display_time(bucket: AggregateBucket, mode: str | None = None) -> str | None:
     parsed_values: list[datetime] = []
     raw_values: list[str] = []
-    for event in bucket.events.values():
+    event_order = bucket.group_config.get("event_order")
+    ordered_types: list[str] = []
+    if isinstance(event_order, list):
+        ordered_types.extend(str(item) for item in event_order)
+    for event_type in bucket.events.keys():
+        if event_type not in ordered_types:
+            ordered_types.append(event_type)
+
+    for event_type in ordered_types:
+        event = bucket.events.get(event_type)
         payload = event.get("payload") if isinstance(event, dict) else None
         if not isinstance(payload, dict):
             continue
@@ -588,110 +593,255 @@ def get_bucket_display_time(bucket: AggregateBucket) -> str | None:
             if parsed is not None:
                 parsed_values.append(parsed)
 
+    prefer = (mode or bucket.phase or "end").lower()
     if parsed_values:
-        chosen = min(parsed_values) if bucket.phase == "start" else max(parsed_values)
+        chosen = min(parsed_values) if prefer == "start" else max(parsed_values)
         return chosen.strftime("%Y-%m-%d %H:%M:%S")
     if raw_values:
-        return raw_values[0] if bucket.phase == "start" else raw_values[-1]
+        return raw_values[0] if prefer == "start" else raw_values[-1]
     return None
 
 
 
-def build_bililive_message(cfg: Config, bucket: AggregateBucket) -> tuple[str | None, dict[str, Any]]:
-    context = merge_bililive_context(bucket)
-    event_types = sorted(bucket.events.keys())
-    suppressed: list[str] = []
+def apply_transform(value: Any, transform: str | None, spec: dict[str, Any] | None = None) -> Any:
+    if transform is None:
+        return value
+    spec = spec or {}
+    if transform == "basename":
+        value = get_file_name(value)
+    elif transform == "duration_human":
+        value = format_duration_human(value)
+    elif transform == "bytes_human":
+        value = format_bytes_human(value)
+    elif transform == "truncate":
+        max_len = int(spec.get("max_len", 84) or 84)
+        value = truncate_value(value, max_len)
+    elif transform == "join_slash":
+        if isinstance(value, list):
+            value = "/".join(str(item) for item in value if item not in {None, ""})
+    return value
 
-    name = str(context.get("Name") or "未知主播")
-    stream_title = str(context.get("Title") or "（无标题）")
-    room_id = context.get("RoomId")
-    area_parent = context.get("AreaNameParent")
-    area_child = context.get("AreaNameChild")
-    file_name = get_file_name(context.get("RelativePath"))
 
-    meta: dict[str, Any] = {
-        "enabled": True,
-        "group_key": bucket.key,
+
+def resolve_context_value(bucket: AggregateBucket, alias: str, spec: Any) -> Any:
+    if isinstance(spec, str):
+        value = get_bucket_field_value(bucket, spec)
+        return value if value not in {None, ""} else None
+
+    if not isinstance(spec, dict):
+        return spec
+
+    value: Any = None
+    if "value" in spec:
+        value = spec.get("value")
+    elif "field" in spec:
+        value = get_bucket_field_value(bucket, str(spec.get("field")))
+    elif "fields" in spec:
+        fields = spec.get("fields")
+        if isinstance(fields, list):
+            values = [get_bucket_field_value(bucket, str(item)) for item in fields]
+            sep = str(spec.get("separator", ""))
+            value = sep.join(str(item) for item in values if item not in {None, ""})
+    elif spec.get("source") == "time":
+        value = get_bucket_display_time(bucket, str(spec.get("mode") or bucket.phase))
+    elif spec.get("source") == "phase":
+        value = bucket.phase
+    elif spec.get("source") == "event_types":
+        value = sorted(bucket.events.keys())
+    elif spec.get("source") == "group_name":
+        value = bucket.group_name
+    elif spec.get("source") == "request_count":
+        value = len(bucket.request_ids)
+    elif spec.get("source") == "event_count":
+        value = len(bucket.events)
+    elif spec.get("source") == "request_ids":
+        value = list(bucket.request_ids)
+
+    transform = spec.get("transform") if isinstance(spec.get("transform"), str) else None
+    value = apply_transform(value, transform, spec)
+    if value in {None, ""} and "default" in spec:
+        value = spec.get("default")
+    return value
+
+
+
+def build_aggregate_context(bucket: AggregateBucket) -> dict[str, Any]:
+    ctx: dict[str, Any] = {
         "phase": bucket.phase,
-        "event_types": event_types,
-        "suppressed": suppressed,
+        "group_name": bucket.group_name,
+        "event_types": ", ".join(sorted(bucket.events.keys())),
+        "event_types_json": json.dumps(sorted(bucket.events.keys()), ensure_ascii=False),
+        "request_count": len(bucket.request_ids),
+        "event_count": len(bucket.events),
     }
 
-    lines: list[str] = []
-    if bucket.phase == "start":
-        has_stream = "StreamStarted" in bucket.events
-        has_session = "SessionStarted" in bucket.events
-        has_file = "FileOpening" in bucket.events
+    area_parent = get_bucket_field_value(bucket, "EventData.AreaNameParent")
+    area_child = get_bucket_field_value(bucket, "EventData.AreaNameChild")
+    relative_path = get_bucket_field_value(bucket, "EventData.RelativePath")
+    ctx.update(
+        {
+            "name": get_bucket_field_value(bucket, "EventData.Name") or "未知主播",
+            "title": get_bucket_field_value(bucket, "EventData.Title") or "（无标题）",
+            "room_id": get_bucket_field_value(bucket, "EventData.RoomId"),
+            "short_id": get_bucket_field_value(bucket, "EventData.ShortId"),
+            "session_id": get_bucket_field_value(bucket, "EventData.SessionId"),
+            "area_parent": area_parent,
+            "area_child": area_child,
+            "area": "/".join(str(item) for item in [area_parent, area_child] if item not in {None, ""}),
+            "file_path": relative_path,
+            "file_name": truncate_value(get_file_name(relative_path), 84),
+            "duration": format_duration_human(get_bucket_field_value(bucket, "EventData.Duration")),
+            "file_size": format_bytes_human(get_bucket_field_value(bucket, "EventData.FileSize")),
+            "time": get_bucket_display_time(bucket),
+        }
+    )
 
-        if has_stream and has_session:
-            lines.append(f"🟢［{name}］开播啦！")
-            if not cfg.notify_file_opening and has_file:
-                suppressed.append("FileOpening")
-        elif has_stream:
-            lines.append(f"🟢［{name}］开播啦！")
-            if not cfg.notify_file_opening and has_file:
-                suppressed.append("FileOpening")
-        elif has_session:
-            lines.append(f"🎬［{name}］开始录制啦！")
-            if not cfg.notify_file_opening and has_file:
-                suppressed.append("FileOpening")
-        elif has_file and cfg.notify_file_opening:
-            lines.append(f"📝［{name}］开始写入录像文件")
-        else:
-            suppressed.extend(sorted(bucket.events.keys()))
-            return None, meta
+    context_spec = bucket.group_config.get("context")
+    if isinstance(context_spec, dict):
+        for alias, spec in context_spec.items():
+            ctx[str(alias)] = resolve_context_value(bucket, alias=str(alias), spec=spec)
 
-        lines.append(f"标题：{stream_title}")
-        if area_parent or area_child:
-            if area_parent and area_child:
-                lines.append(f"分区：{area_parent}/{area_child}")
-            else:
-                lines.append(f"分区：{area_parent or area_child}")
-        if room_id is not None:
-            lines.append(f"房间：{room_id}")
-        if cfg.notify_file_opening and has_file and file_name:
-            lines.append(f"文件：{truncate_middle(file_name, 84)}")
-        if display_time:
-            lines.append(f"时间：{display_time}")
-        return "\n".join(lines).strip(), meta
+    return ctx
 
-    has_stream_end = "StreamEnded" in bucket.events
-    has_session_end = "SessionEnded" in bucket.events
-    has_file_closed = "FileClosed" in bucket.events
 
-    if has_stream_end and has_file_closed:
-        lines.append(f"🔴［{name}］下播啦！")
-    elif has_stream_end and has_session_end:
-        lines.append(f"🔴［{name}］下播啦！")
-    elif has_file_closed and has_session_end:
-        lines.append(f"✅［{name}］录制结束啦！")
-    elif has_file_closed:
-        lines.append(f"📦［{name}］文件完成")
-    elif has_stream_end:
-        lines.append(f"🔴［{name}］下播啦！")
-    elif has_session_end:
-        lines.append(f"✅［{name}］录制结束啦！")
-    else:
-        return None, meta
 
-    lines.append(f"标题：{stream_title}")
+def render_output_spec(output: dict[str, Any], context: dict[str, Any]) -> str | None:
+    return render_rule_output({"output": output}, context)
 
-    stats: list[str] = []
-    if context.get("Duration") not in {None, ""}:
-        stats.append(f"时长：{format_duration_human(context.get('Duration'))}")
-    if context.get("FileSize") not in {None, ""}:
-        stats.append(f"大小：{format_bytes_human(context.get('FileSize'))}")
-    if stats:
-        lines.append("｜".join(stats))
-    elif room_id is not None:
-        lines.append(f"房间：{room_id}")
 
-    if has_file_closed and file_name:
-        lines.append(f"文件：{truncate_middle(file_name, 84)}")
-    if display_time:
-        lines.append(f"时间：{display_time}")
 
-    return "\n".join(lines).strip(), meta
+def aggregate_output_matches(rule: dict[str, Any], context: dict[str, Any], event_types: set[str]) -> bool:
+    match = rule.get("match")
+    if not isinstance(match, dict):
+        return True
+
+    all_types = match.get("event_types_all")
+    if isinstance(all_types, list):
+        required = {str(item) for item in all_types}
+        if not required.issubset(event_types):
+            return False
+
+    any_types = match.get("event_types_any")
+    if isinstance(any_types, list):
+        allowed = {str(item) for item in any_types}
+        if event_types.isdisjoint(allowed):
+            return False
+
+    none_types = match.get("event_types_none")
+    if isinstance(none_types, list):
+        denied = {str(item) for item in none_types}
+        if event_types & denied:
+            return False
+
+    field_equals = match.get("field_equals")
+    if isinstance(field_equals, dict):
+        for key, expected in field_equals.items():
+            if context.get(key) != expected:
+                return False
+
+    field_in = match.get("field_in")
+    if isinstance(field_in, dict):
+        for key, expected_values in field_in.items():
+            values = expected_values if isinstance(expected_values, list) else [expected_values]
+            if context.get(key) not in values:
+                return False
+
+    return True
+
+
+
+def select_aggregate_output(bucket: AggregateBucket, context: dict[str, Any]) -> tuple[str | None, list[str]]:
+    group = bucket.group_config
+    outputs = group.get("outputs")
+    event_types = set(bucket.events.keys())
+    suppress_event_types = [str(item) for item in group.get("suppress_event_types", []) if isinstance(item, (str, int, float))]
+
+    if isinstance(outputs, list):
+        for item in outputs:
+            if not isinstance(item, dict):
+                continue
+            if not aggregate_output_matches(item, context, event_types):
+                continue
+            output = item.get("output")
+            if not isinstance(output, dict):
+                continue
+            rendered = render_output_spec(output, context)
+            if rendered:
+                return rendered, suppress_event_types
+
+    output = group.get("output")
+    if isinstance(output, dict):
+        rendered = render_output_spec(output, context)
+        if rendered:
+            return rendered, suppress_event_types
+
+    return None, suppress_event_types
+
+
+
+def compute_aggregate_phase(group: dict[str, Any], payload: dict[str, Any]) -> str:
+    phase = group.get("phase")
+    if isinstance(phase, str) and phase.strip():
+        return phase.strip()
+    event_type = payload.get("EventType")
+    if isinstance(event_type, str) and event_type.lower().endswith("started"):
+        return "start"
+    if isinstance(event_type, str) and event_type.lower().endswith("ended"):
+        return "end"
+    return "group"
+
+
+
+def build_aggregate_key(group: dict[str, Any], payload: dict[str, Any], phase: str) -> str:
+    key_fields = group.get("key_fields")
+    parts = [f"aggregate:{group.get('name', 'group')}:{phase}"]
+    if isinstance(key_fields, list):
+        for field in key_fields:
+            value = get_field_value(payload, str(field))
+            parts.append(str(value) if value not in {None, ""} else "_")
+    return ":".join(parts)
+
+
+
+def get_aggregate_group(cfg: Config, handler: BaseHTTPRequestHandler, payload: dict[str, Any]) -> tuple[dict[str, Any] | None, int]:
+    rules_doc = load_rules(cfg.rules_path)
+    aggregate = rules_doc.get("aggregate")
+    if not isinstance(aggregate, dict):
+        return None, cfg.aggregate_window_ms
+    if aggregate.get("enabled", True) is False:
+        return None, cfg.aggregate_window_ms
+
+    groups = aggregate.get("groups")
+    default_window = int(aggregate.get("window_ms", cfg.aggregate_window_ms) or cfg.aggregate_window_ms)
+    if not isinstance(groups, list):
+        return None, default_window
+
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        if group.get("enabled", True) is False:
+            continue
+        if rule_matches({"match": group.get("match")}, handler, payload):
+            window_ms = int(group.get("window_ms", default_window) or default_window)
+            return group, max(0, window_ms)
+
+    return None, default_window
+
+
+
+def build_aggregate_message(bucket: AggregateBucket) -> tuple[str | None, dict[str, Any]]:
+    context = build_aggregate_context(bucket)
+    text, suppressed = select_aggregate_output(bucket, context)
+    meta: dict[str, Any] = {
+        "enabled": True,
+        "group_name": bucket.group_name,
+        "group_key": bucket.key,
+        "phase": bucket.phase,
+        "event_types": sorted(bucket.events.keys()),
+        "suppressed": suppressed,
+        "context": context,
+    }
+    return text, meta
 
 
 
@@ -701,7 +851,7 @@ def flush_aggregate_bucket(cfg: Config, key: str) -> None:
     if bucket is None:
         return
 
-    text, aggregate_meta = build_bililive_message(cfg, bucket)
+    text, aggregate_meta = build_aggregate_message(bucket)
     message_record: dict[str, Any] = {
         "ts": now_iso(),
         "request_id": bucket.request_ids[0] if bucket.request_ids else uuid4().hex,
@@ -739,6 +889,7 @@ def flush_aggregate_bucket(cfg: Config, key: str) -> None:
                 {
                     "event": "aggregate_forwarded",
                     "group_key": key,
+                    "group_name": bucket.group_name,
                     "phase": bucket.phase,
                     "event_types": aggregate_meta["event_types"],
                     "chunks": len(chunks),
@@ -771,18 +922,15 @@ def flush_aggregate_bucket(cfg: Config, key: str) -> None:
 
 
 
-def queue_aggregate_event(cfg: Config, parsed: urllib.parse.ParseResult, payload: dict[str, Any], auth: dict[str, Any], request_record: dict[str, Any], request_id: str, remote_ip: str) -> dict[str, Any] | None:
-    phase = get_bililive_phase(payload)
-    if phase is None:
+def queue_aggregate_event(cfg: Config, handler: BaseHTTPRequestHandler, parsed: urllib.parse.ParseResult, payload: dict[str, Any], auth: dict[str, Any], request_record: dict[str, Any], request_id: str, remote_ip: str) -> dict[str, Any] | None:
+    group, window_ms = get_aggregate_group(cfg, handler, payload)
+    if group is None:
         return None
 
-    event_type = str(payload.get("EventType"))
-    if event_type not in BILILIVE_ALL_TYPES:
-        return None
-
-    key = get_bililive_group_key(payload, phase)
+    phase = compute_aggregate_phase(group, payload)
+    group_name = str(group.get("name") or "aggregate_group")
+    key = build_aggregate_key(group, payload, phase)
     should_start_timer = False
-    bucket: AggregateBucket
 
     with AGGREGATE_LOCK:
         bucket = AGGREGATE_BUCKETS.get(key)
@@ -790,6 +938,8 @@ def queue_aggregate_event(cfg: Config, parsed: urllib.parse.ParseResult, payload
             bucket = AggregateBucket(
                 key=key,
                 phase=phase,
+                group_name=group_name,
+                group_config=group,
                 created_at=time.time(),
                 request_path=parsed.path,
                 remote_ip=remote_ip,
@@ -801,6 +951,7 @@ def queue_aggregate_event(cfg: Config, parsed: urllib.parse.ParseResult, payload
 
         if request_id not in bucket.request_ids:
             bucket.request_ids.append(request_id)
+        event_type = str(payload.get("EventType") or request_id)
         bucket.events[event_type] = {
             "request_id": request_id,
             "payload": payload,
@@ -813,7 +964,7 @@ def queue_aggregate_event(cfg: Config, parsed: urllib.parse.ParseResult, payload
         bucket.target = {"private": cfg.private, "group": cfg.group}
 
         if should_start_timer:
-            timer = threading.Timer(cfg.aggregate_window_ms / 1000, flush_aggregate_bucket, args=(cfg, key))
+            timer = threading.Timer(window_ms / 1000, flush_aggregate_bucket, args=(cfg, key))
             timer.daemon = True
             bucket.timer = timer
             timer.start()
@@ -821,10 +972,12 @@ def queue_aggregate_event(cfg: Config, parsed: urllib.parse.ParseResult, payload
     return {
         "queued": True,
         "phase": phase,
-        "event_type": event_type,
+        "group_name": group_name,
         "group_key": key,
-        "window_ms": cfg.aggregate_window_ms,
+        "window_ms": window_ms,
+        "event_type": str(payload.get("EventType") or "unknown"),
     }
+
 
 
 class WebhookHandler(BaseHTTPRequestHandler):
@@ -929,8 +1082,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         )
         append_request_log(self.cfg, request_record)
 
-        if is_bililive_event(payload):
-            aggregate_meta = queue_aggregate_event(self.cfg, parsed, payload, auth, request_record, request_id, self.client_address[0])
+        if is_aggregate_candidate(payload):
+            aggregate_meta = queue_aggregate_event(self.cfg, self, parsed, payload, auth, request_record, request_id, self.client_address[0])
             if aggregate_meta is not None:
                 self._send_json(200, {"ok": True, "queued": True, "aggregate": aggregate_meta, "request_id": request_id})
                 return
