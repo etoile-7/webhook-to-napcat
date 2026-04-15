@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +23,7 @@ from uuid import uuid4
 SENSITIVE_HEADERS = {"authorization", "x-webhook-secret", "proxy-authorization"}
 AGGREGATE_LOCK = threading.Lock()
 AGGREGATE_BUCKETS: dict[str, "AggregateBucket"] = {}
+PRICE_TABLE_CACHE: dict[str, dict[str, float]] = {}
 
 
 @dataclass
@@ -60,6 +62,7 @@ class AggregateBucket:
     request_ids: list[str] = field(default_factory=list)
     events: dict[str, dict[str, Any]] = field(default_factory=dict)
     payload_summaries: list[str] = field(default_factory=list)
+    computed: dict[str, Any] = field(default_factory=dict)
     timer: threading.Timer | None = None
 
 
@@ -529,6 +532,266 @@ def get_file_name(path_value: Any) -> str | None:
 
 
 
+def format_money(value: Any) -> str:
+    try:
+        amount = float(value)
+    except Exception:  # noqa: BLE001
+        return str(value)
+    if amount.is_integer():
+        return str(int(amount))
+    text = f"{amount:.2f}"
+    return text.rstrip("0").rstrip(".")
+
+
+
+def format_count_k(value: Any) -> str:
+    try:
+        count = float(value)
+    except Exception:  # noqa: BLE001
+        return str(value)
+    if count >= 1000:
+        return f"{count / 1000:.1f}k"
+    if count.is_integer():
+        return str(int(count))
+    return str(count)
+
+
+
+def build_guard_increment_line(captain: int, commander: int, governor: int) -> str:
+    parts: list[str] = []
+    if captain > 0:
+        parts.append(f"新增舰长：{captain}")
+    if commander > 0:
+        parts.append(f"提督：{commander}")
+    if governor > 0:
+        parts.append(f"总督：{governor}")
+    return " ｜ ".join(parts)
+
+
+
+def load_markdown_price_table(path_value: str) -> dict[str, float]:
+    cached = PRICE_TABLE_CACHE.get(path_value)
+    if cached is not None:
+        return cached
+
+    prices: dict[str, float] = {}
+    path = Path(path_value)
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        PRICE_TABLE_CACHE[path_value] = prices
+        return prices
+    except Exception as exc:  # noqa: BLE001
+        eprint(f"[price-table-error] {path_value}: {exc}")
+        PRICE_TABLE_CACHE[path_value] = prices
+        return prices
+
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            continue
+        parts = [part.strip() for part in line.strip("|").split("|")]
+        if len(parts) != 2:
+            continue
+        name, price = parts
+        if name in {"礼物名", "---"} or set(name) == {"-"}:
+            continue
+        try:
+            prices[name] = float(price)
+        except Exception:  # noqa: BLE001
+            continue
+
+    PRICE_TABLE_CACHE[path_value] = prices
+    return prices
+
+
+
+def derive_xml_path(relative_path: str, base_dir: str, strip_prefixes: list[str] | None = None) -> Path:
+    normalized = relative_path.strip().replace("\\", "/")
+    for prefix in strip_prefixes or []:
+        prefix_text = str(prefix).strip().replace("\\", "/")
+        if prefix_text and normalized.startswith(prefix_text):
+            normalized = normalized[len(prefix_text) :]
+            normalized = normalized.lstrip("/")
+            break
+    joined = Path(base_dir) / normalized
+    return joined.with_suffix(".xml")
+
+
+
+def compute_xml_live_stats(xml_path: Path, price_table_path: str | None = None, guard_level_map: dict[str, str] | None = None) -> dict[str, Any]:
+    stats: dict[str, Any] = {
+        "xml_path": str(xml_path),
+        "xml_exists": False,
+        "bullet_count": "",
+        "bullet_count_display": "",
+        "interaction_count": "",
+        "interaction_count_display": "",
+        "sc_count": "",
+        "sc_total": "",
+        "guard_count": "",
+        "guard_total": "",
+        "gift_total": "",
+        "total_revenue": "",
+        "gift_unknown_count": 0,
+        "gift_unknown_summary": "",
+        "gift_unknown_line": "",
+        "gift_total_label": "礼物营收",
+        "total_revenue_label": "总营收",
+    }
+    if not xml_path.exists():
+        return stats
+
+    try:
+        root = ET.parse(xml_path).getroot()
+    except Exception as exc:  # noqa: BLE001
+        eprint(f"[xml-stats-error] {xml_path}: {exc}")
+        return stats
+
+    gift_prices = load_markdown_price_table(price_table_path) if price_table_path else {}
+    guard_level_map = guard_level_map or {"3": "舰长", "2": "提督", "1": "总督"}
+
+    bullet_count = 0
+    sc_count = 0
+    guard_count = 0
+    captain_count = 0
+    commander_count = 0
+    governor_count = 0
+    gift_total = 0.0
+    sc_total = 0.0
+    guard_total = 0.0
+    gift_unknown: dict[str, int] = {}
+    interaction_users: set[str] = set()
+
+    def add_interaction_user(uid: Any = None, user: Any = None) -> None:
+        uid_text = str(uid or "").strip()
+        if uid_text:
+            interaction_users.add(f"uid:{uid_text}")
+            return
+        user_text = str(user or "").strip()
+        if user_text:
+            interaction_users.add(f"user:{user_text}")
+
+    for child in root:
+        tag = child.tag.split("}")[-1]
+        if tag == "d":
+            bullet_count += 1
+            p_value = str(child.attrib.get("p", ""))
+            p_parts = p_value.split(",") if p_value else []
+            add_interaction_user(p_parts[6] if len(p_parts) > 6 else "", child.attrib.get("user", ""))
+        elif tag == "gift":
+            add_interaction_user(child.attrib.get("uid", ""), child.attrib.get("user", ""))
+            gift_name = child.attrib.get("giftname", "")
+            try:
+                gift_count = int(child.attrib.get("giftcount", "0") or "0")
+            except Exception:  # noqa: BLE001
+                gift_count = 0
+            price = gift_prices.get(gift_name)
+            if price is None:
+                gift_unknown[gift_name] = gift_unknown.get(gift_name, 0) + gift_count
+            else:
+                gift_total += price * gift_count
+        elif tag == "sc":
+            add_interaction_user(child.attrib.get("uid", ""), child.attrib.get("user", ""))
+            sc_count += 1
+            try:
+                sc_total += float(child.attrib.get("price", "0") or "0")
+            except Exception:  # noqa: BLE001
+                pass
+        elif tag == "guard":
+            add_interaction_user(child.attrib.get("uid", ""), child.attrib.get("user", ""))
+            level = str(child.attrib.get("level", ""))
+            try:
+                count = int(child.attrib.get("count", "0") or "0")
+            except Exception:  # noqa: BLE001
+                count = 0
+            guard_count += count
+            if level == "3":
+                captain_count += count
+            elif level == "2":
+                commander_count += count
+            elif level == "1":
+                governor_count += count
+            level_name = guard_level_map.get(level, "")
+            guard_total += gift_prices.get(level_name, 0.0) * count
+
+    interaction_count = len(interaction_users)
+    gift_unknown_summary = "、".join(f"{name}×{count}" for name, count in sorted(gift_unknown.items()) if name)
+    total_revenue = gift_total + sc_total + guard_total
+
+    stats.update(
+        {
+            "xml_exists": True,
+            "bullet_count": str(bullet_count),
+            "bullet_count_display": format_count_k(bullet_count),
+            "interaction_count": str(interaction_count),
+            "interaction_count_display": format_count_k(interaction_count),
+            "sc_count": str(sc_count),
+            "sc_total": format_money(sc_total),
+            "guard_count": str(guard_count),
+            "captain_count": str(captain_count),
+            "commander_count": str(commander_count),
+            "governor_count": str(governor_count),
+            "guard_increment_line": build_guard_increment_line(captain_count, commander_count, governor_count),
+            "guard_total": format_money(guard_total),
+            "gift_total": format_money(gift_total),
+            "total_revenue": format_money(total_revenue),
+            "gift_unknown_count": len(gift_unknown),
+            "gift_unknown_summary": gift_unknown_summary,
+            "gift_unknown_line": f"\n未知礼物：{gift_unknown_summary}" if gift_unknown_summary else "",
+            "gift_total_label": "礼物营收（已知）" if gift_unknown_summary else "礼物营收",
+            "total_revenue_label": "总营收（已知）" if gift_unknown_summary else "总营收",
+        }
+    )
+    return stats
+
+
+
+def get_xml_live_stats(bucket: AggregateBucket, spec: dict[str, Any]) -> dict[str, Any]:
+    relative_path_field = str(spec.get("relative_path_field") or "EventData.RelativePath")
+    base_dir = str(spec.get("base_dir") or "").strip()
+    price_table_path = str(spec.get("gift_prices_markdown_path") or "").strip() or None
+    strip_prefixes_raw = spec.get("strip_prefixes")
+    strip_prefixes = [str(item) for item in strip_prefixes_raw] if isinstance(strip_prefixes_raw, list) else []
+    guard_level_map_raw = spec.get("guard_level_map")
+    guard_level_map = {str(k): str(v) for k, v in guard_level_map_raw.items()} if isinstance(guard_level_map_raw, dict) else None
+
+    relative_path = get_bucket_field_value(bucket, relative_path_field)
+    if not isinstance(relative_path, str) or not relative_path.strip() or not base_dir:
+        return {
+            "xml_exists": False,
+            "xml_path": "",
+            "bullet_count_display": "",
+            "interaction_count_display": "",
+            "captain_count": "",
+            "commander_count": "",
+            "governor_count": "",
+            "guard_increment_line": "",
+            "gift_unknown_line": "",
+            "gift_total_label": "礼物营收",
+            "total_revenue_label": "总营收",
+        }
+
+    xml_path = derive_xml_path(relative_path, base_dir=base_dir, strip_prefixes=strip_prefixes)
+    cache_key = json.dumps(
+        {
+            "source": "xml_live_stats",
+            "xml_path": str(xml_path),
+            "price_table_path": price_table_path,
+            "guard_level_map": guard_level_map,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    cached = bucket.computed.get(cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    stats = compute_xml_live_stats(xml_path, price_table_path=price_table_path, guard_level_map=guard_level_map)
+    bucket.computed[cache_key] = stats
+    return stats
+
+
+
 def get_bucket_field_value(bucket: AggregateBucket, field: str) -> Any:
     event_order = bucket.group_config.get("event_order")
     ordered_types: list[str] = []
@@ -656,6 +919,10 @@ def resolve_context_value(bucket: AggregateBucket, alias: str, spec: Any) -> Any
         value = len(bucket.events)
     elif spec.get("source") == "request_ids":
         value = list(bucket.request_ids)
+    elif spec.get("source") == "xml_live_stats":
+        stats = get_xml_live_stats(bucket, spec)
+        stats_key = str(spec.get("key") or alias)
+        value = stats.get(stats_key)
 
     transform = spec.get("transform") if isinstance(spec.get("transform"), str) else None
     value = apply_transform(value, transform, spec)
