@@ -23,6 +23,8 @@ from uuid import uuid4
 SENSITIVE_HEADERS = {"authorization", "x-webhook-secret", "proxy-authorization"}
 AGGREGATE_LOCK = threading.Lock()
 AGGREGATE_BUCKETS: dict[str, "AggregateBucket"] = {}
+NOTIFY_DEBOUNCE_LOCK = threading.Lock()
+NOTIFY_DEBOUNCE_KEYS: dict[str, float] = {}
 PRICE_TABLE_CACHE: dict[str, dict[str, float]] = {}
 
 
@@ -46,6 +48,7 @@ class Config:
     log_dir: str
     aggregate_window_ms: int
     notify_file_opening: bool
+    notify_debounce_ms: int
 
 
 @dataclass
@@ -1116,6 +1119,55 @@ def build_aggregate_message(bucket: AggregateBucket) -> tuple[str | None, dict[s
 
 
 
+def build_notify_debounce_key(aggregate_meta: dict[str, Any]) -> str | None:
+    group_name = str(aggregate_meta.get("group_name") or "").strip()
+    if group_name not in {"bililive_start", "bililive_end"}:
+        return None
+
+    context = aggregate_meta.get("context") if isinstance(aggregate_meta.get("context"), dict) else {}
+    room_id = context.get("room_id")
+    title = str(context.get("title") or "").strip()
+    name = str(context.get("name") or "").strip()
+    if room_id in {None, ""} or not title:
+        return None
+    return f"bililive:{room_id}:{name}:{title}"
+
+
+
+def should_suppress_aggregate_notification(cfg: Config, aggregate_meta: dict[str, Any]) -> dict[str, Any]:
+    debounce_ms = max(0, int(cfg.notify_debounce_ms or 0))
+    if debounce_ms <= 0:
+        return {"suppressed": False}
+
+    debounce_key = build_notify_debounce_key(aggregate_meta)
+    if not debounce_key:
+        return {"suppressed": False}
+
+    now_ts = time.time()
+    expires_at = now_ts + debounce_ms / 1000
+    with NOTIFY_DEBOUNCE_LOCK:
+        expired_keys = [key for key, expiry in NOTIFY_DEBOUNCE_KEYS.items() if expiry <= now_ts]
+        for expired_key in expired_keys:
+            NOTIFY_DEBOUNCE_KEYS.pop(expired_key, None)
+
+        existing_expiry = NOTIFY_DEBOUNCE_KEYS.get(debounce_key)
+        if existing_expiry and existing_expiry > now_ts:
+            return {
+                "suppressed": True,
+                "key": debounce_key,
+                "remaining_ms": int((existing_expiry - now_ts) * 1000),
+            }
+
+        NOTIFY_DEBOUNCE_KEYS[debounce_key] = expires_at
+
+    return {
+        "suppressed": False,
+        "key": debounce_key,
+        "expires_in_ms": debounce_ms,
+    }
+
+
+
 def flush_aggregate_bucket(cfg: Config, key: str) -> None:
     with AGGREGATE_LOCK:
         bucket = AGGREGATE_BUCKETS.pop(key, None)
@@ -1147,6 +1199,28 @@ def flush_aggregate_bucket(cfg: Config, key: str) -> None:
         return
 
     message_record["forward_text"] = text
+
+    debounce_info = should_suppress_aggregate_notification(cfg, aggregate_meta)
+    if debounce_info.get("suppressed"):
+        message_record["outcome"] = "suppressed"
+        message_record["debounce"] = debounce_info
+        append_message_log(cfg, message_record)
+        eprint(
+            json.dumps(
+                {
+                    "event": "aggregate_debounce_suppressed",
+                    "group_key": key,
+                    "group_name": bucket.group_name,
+                    "request_ids": bucket.request_ids,
+                    "debounce": debounce_info,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
+
+    if debounce_info.get("key"):
+        message_record["debounce"] = debounce_info
 
     try:
         results, chunks = send_text_to_napcat(cfg, text)
@@ -1444,6 +1518,7 @@ def parse_args() -> Config:
     ap.add_argument("--log-dir", default=os.getenv("WEBHOOK_LOG_DIR", "/logs"), help="消息日志目录；按 requests/messages/errors 三层写入 JSONL")
     ap.add_argument("--aggregate-window-ms", type=int, default=int(os.getenv("WEBHOOK_AGGREGATE_WINDOW_MS", "3000")), help="BililiveRecorder 事件聚合窗口（毫秒）；开始/结束类事件会在窗口内合并后统一发送")
     ap.add_argument("--notify-file-opening", action="store_true", default=os.getenv("WEBHOOK_NOTIFY_FILE_OPENING", "0") in {"1", "true", "True"}, help="是否单独发送 FileOpening 类事件；默认关闭，仅参与聚合")
+    ap.add_argument("--notify-debounce-ms", type=int, default=int(os.getenv("WEBHOOK_NOTIFY_DEBOUNCE_MS", "60000")), help="聚合消息通知级消抖窗口（毫秒）；同一 room/title 在窗口内只发第一条，后续视为抖动抑制")
     args = ap.parse_args()
 
     private_target = args.private if args.private is not None else (int(private_env) if private_env else None)
@@ -1477,6 +1552,7 @@ def parse_args() -> Config:
         log_dir=args.log_dir,
         aggregate_window_ms=max(0, args.aggregate_window_ms),
         notify_file_opening=args.notify_file_opening,
+        notify_debounce_ms=max(0, args.notify_debounce_ms),
     )
 
 
