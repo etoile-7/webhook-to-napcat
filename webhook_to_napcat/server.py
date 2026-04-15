@@ -560,11 +560,11 @@ def format_count_k(value: Any) -> str:
 def build_guard_increment_line(captain: int, commander: int, governor: int) -> str:
     parts: list[str] = []
     if captain > 0:
-        parts.append(f"新增舰长：{captain}")
+        parts.append(f"新增舰长 ： {captain}")
     if commander > 0:
-        parts.append(f"提督：{commander}")
+        parts.append(f"提督 ： {commander}")
     if governor > 0:
-        parts.append(f"总督：{governor}")
+        parts.append(f"总督 ： {governor}")
     return " ｜ ".join(parts)
 
 
@@ -635,6 +635,7 @@ def compute_xml_live_stats(xml_path: Path, price_table_path: str | None = None, 
         "gift_unknown_count": 0,
         "gift_unknown_summary": "",
         "gift_unknown_line": "",
+        "guard_increment_line_block": "",
         "gift_total_label": "礼物营收",
         "total_revenue_label": "总营收",
     }
@@ -715,6 +716,7 @@ def compute_xml_live_stats(xml_path: Path, price_table_path: str | None = None, 
             guard_total += gift_prices.get(level_name, 0.0) * count
 
     interaction_count = len(interaction_users)
+    guard_increment_line = build_guard_increment_line(captain_count, commander_count, governor_count)
     gift_unknown_summary = "、".join(f"{name}×{count}" for name, count in sorted(gift_unknown.items()) if name)
     total_revenue = gift_total + sc_total + guard_total
 
@@ -731,7 +733,8 @@ def compute_xml_live_stats(xml_path: Path, price_table_path: str | None = None, 
             "captain_count": str(captain_count),
             "commander_count": str(commander_count),
             "governor_count": str(governor_count),
-            "guard_increment_line": build_guard_increment_line(captain_count, commander_count, governor_count),
+            "guard_increment_line": guard_increment_line,
+            "guard_increment_line_block": f"\n{guard_increment_line}" if guard_increment_line else "",
             "guard_total": format_money(guard_total),
             "gift_total": format_money(gift_total),
             "total_revenue": format_money(total_revenue),
@@ -766,6 +769,7 @@ def get_xml_live_stats(bucket: AggregateBucket, spec: dict[str, Any]) -> dict[st
             "commander_count": "",
             "governor_count": "",
             "guard_increment_line": "",
+            "guard_increment_line_block": "",
             "gift_unknown_line": "",
             "gift_total_label": "礼物营收",
             "total_revenue_label": "总营收",
