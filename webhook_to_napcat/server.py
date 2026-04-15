@@ -23,8 +23,8 @@ from uuid import uuid4
 SENSITIVE_HEADERS = {"authorization", "x-webhook-secret", "proxy-authorization"}
 AGGREGATE_LOCK = threading.Lock()
 AGGREGATE_BUCKETS: dict[str, "AggregateBucket"] = {}
-NOTIFY_DEBOUNCE_LOCK = threading.Lock()
-NOTIFY_DEBOUNCE_KEYS: dict[str, float] = {}
+PENDING_END_LOCK = threading.Lock()
+PENDING_END_NOTIFICATIONS: dict[str, "PendingEndNotification"] = {}
 PRICE_TABLE_CACHE: dict[str, dict[str, float]] = {}
 
 
@@ -66,6 +66,14 @@ class AggregateBucket:
     events: dict[str, dict[str, Any]] = field(default_factory=dict)
     payload_summaries: list[str] = field(default_factory=list)
     computed: dict[str, Any] = field(default_factory=dict)
+    timer: threading.Timer | None = None
+
+
+@dataclass
+class PendingEndNotification:
+    key: str
+    bucket: AggregateBucket
+    expires_at: float
     timer: threading.Timer | None = None
 
 
@@ -1119,7 +1127,7 @@ def build_aggregate_message(bucket: AggregateBucket) -> tuple[str | None, dict[s
 
 
 
-def build_notify_debounce_key(aggregate_meta: dict[str, Any]) -> str | None:
+def build_bililive_notification_key(aggregate_meta: dict[str, Any]) -> str | None:
     group_name = str(aggregate_meta.get("group_name") or "").strip()
     if group_name not in {"bililive_start", "bililive_end"}:
         return None
@@ -1134,48 +1142,8 @@ def build_notify_debounce_key(aggregate_meta: dict[str, Any]) -> str | None:
 
 
 
-def should_suppress_aggregate_notification(cfg: Config, aggregate_meta: dict[str, Any]) -> dict[str, Any]:
-    debounce_ms = max(0, int(cfg.notify_debounce_ms or 0))
-    if debounce_ms <= 0:
-        return {"suppressed": False}
-
-    debounce_key = build_notify_debounce_key(aggregate_meta)
-    if not debounce_key:
-        return {"suppressed": False}
-
-    now_ts = time.time()
-    expires_at = now_ts + debounce_ms / 1000
-    with NOTIFY_DEBOUNCE_LOCK:
-        expired_keys = [key for key, expiry in NOTIFY_DEBOUNCE_KEYS.items() if expiry <= now_ts]
-        for expired_key in expired_keys:
-            NOTIFY_DEBOUNCE_KEYS.pop(expired_key, None)
-
-        existing_expiry = NOTIFY_DEBOUNCE_KEYS.get(debounce_key)
-        if existing_expiry and existing_expiry > now_ts:
-            return {
-                "suppressed": True,
-                "key": debounce_key,
-                "remaining_ms": int((existing_expiry - now_ts) * 1000),
-            }
-
-        NOTIFY_DEBOUNCE_KEYS[debounce_key] = expires_at
-
+def build_aggregate_message_record(bucket: AggregateBucket, aggregate_meta: dict[str, Any]) -> dict[str, Any]:
     return {
-        "suppressed": False,
-        "key": debounce_key,
-        "expires_in_ms": debounce_ms,
-    }
-
-
-
-def flush_aggregate_bucket(cfg: Config, key: str) -> None:
-    with AGGREGATE_LOCK:
-        bucket = AGGREGATE_BUCKETS.pop(key, None)
-    if bucket is None:
-        return
-
-    text, aggregate_meta = build_aggregate_message(bucket)
-    message_record: dict[str, Any] = {
         "ts": now_iso(),
         "request_id": bucket.request_ids[0] if bucket.request_ids else uuid4().hex,
         "related_request_ids": bucket.request_ids,
@@ -1192,34 +1160,22 @@ def flush_aggregate_bucket(cfg: Config, key: str) -> None:
         "aggregate": aggregate_meta,
     }
 
+
+
+def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info: dict[str, Any] | None = None) -> None:
+    text, aggregate_meta = build_aggregate_message(bucket)
+    message_record = build_aggregate_message_record(bucket, aggregate_meta)
+
     if not text:
         message_record["outcome"] = "suppressed"
+        if debounce_info:
+            message_record["debounce"] = debounce_info
         append_message_log(cfg, message_record)
-        eprint(json.dumps({"event": "aggregate_suppressed", "request_ids": bucket.request_ids, "group_key": key}, ensure_ascii=False))
+        eprint(json.dumps({"event": "aggregate_suppressed", "request_ids": bucket.request_ids, "group_key": bucket.key}, ensure_ascii=False))
         return
 
     message_record["forward_text"] = text
-
-    debounce_info = should_suppress_aggregate_notification(cfg, aggregate_meta)
-    if debounce_info.get("suppressed"):
-        message_record["outcome"] = "suppressed"
-        message_record["debounce"] = debounce_info
-        append_message_log(cfg, message_record)
-        eprint(
-            json.dumps(
-                {
-                    "event": "aggregate_debounce_suppressed",
-                    "group_key": key,
-                    "group_name": bucket.group_name,
-                    "request_ids": bucket.request_ids,
-                    "debounce": debounce_info,
-                },
-                ensure_ascii=False,
-            )
-        )
-        return
-
-    if debounce_info.get("key"):
+    if debounce_info:
         message_record["debounce"] = debounce_info
 
     try:
@@ -1233,7 +1189,7 @@ def flush_aggregate_bucket(cfg: Config, key: str) -> None:
             json.dumps(
                 {
                     "event": "aggregate_forwarded",
-                    "group_key": key,
+                    "group_key": bucket.key,
                     "group_name": bucket.group_name,
                     "phase": bucket.phase,
                     "event_types": aggregate_meta["event_types"],
@@ -1263,9 +1219,202 @@ def flush_aggregate_bucket(cfg: Config, key: str) -> None:
                 "aggregate": aggregate_meta,
             },
         )
-        eprint(f"[aggregate-forward-error] group_key={key} {exc}")
+        eprint(f"[aggregate-forward-error] group_key={bucket.key} {exc}")
 
 
+
+def flush_pending_end_notification(cfg: Config, notify_key: str) -> None:
+    with PENDING_END_LOCK:
+        pending = PENDING_END_NOTIFICATIONS.pop(notify_key, None)
+    if pending is None:
+        return
+
+    deliver_aggregate_bucket(
+        cfg,
+        pending.bucket,
+        debounce_info={
+            "mode": "pending_end_window",
+            "status": "expired_forwarded",
+            "key": notify_key,
+            "window_ms": max(0, int(cfg.notify_debounce_ms or 0)),
+        },
+    )
+
+
+
+def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
+    text, aggregate_meta = build_aggregate_message(bucket)
+    message_record = build_aggregate_message_record(bucket, aggregate_meta)
+
+    if not text:
+        message_record["outcome"] = "suppressed"
+        append_message_log(cfg, message_record)
+        eprint(json.dumps({"event": "aggregate_suppressed", "request_ids": bucket.request_ids, "group_key": bucket.key}, ensure_ascii=False))
+        return True
+
+    notify_key = build_bililive_notification_key(aggregate_meta)
+    group_name = str(aggregate_meta.get("group_name") or "").strip()
+    event_types = set(aggregate_meta.get("event_types") or [])
+    window_ms = max(0, int(cfg.notify_debounce_ms or 0))
+
+    if not notify_key or window_ms <= 0 or group_name not in {"bililive_start", "bililive_end"}:
+        deliver_aggregate_bucket(cfg, bucket)
+        return True
+
+    now_ts = time.time()
+    with PENDING_END_LOCK:
+        expired_keys = [key for key, pending in PENDING_END_NOTIFICATIONS.items() if pending.expires_at <= now_ts]
+    for expired_key in expired_keys:
+        flush_pending_end_notification(cfg, expired_key)
+
+    if group_name == "bililive_start":
+        with PENDING_END_LOCK:
+            pending = PENDING_END_NOTIFICATIONS.get(notify_key)
+        if pending and pending.expires_at > time.time():
+            message_record["forward_text"] = text
+            message_record["outcome"] = "suppressed"
+            message_record["debounce"] = {
+                "mode": "pending_end_window",
+                "status": "suppressed_start_during_pending_end",
+                "key": notify_key,
+                "remaining_ms": int((pending.expires_at - time.time()) * 1000),
+            }
+            append_message_log(cfg, message_record)
+            eprint(
+                json.dumps(
+                    {
+                        "event": "aggregate_pending_end_suppressed_start",
+                        "group_key": bucket.key,
+                        "group_name": bucket.group_name,
+                        "request_ids": bucket.request_ids,
+                        "debounce": message_record["debounce"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return True
+
+        deliver_aggregate_bucket(
+            cfg,
+            bucket,
+            debounce_info={
+                "mode": "pending_end_window",
+                "status": "sent_immediately",
+                "key": notify_key,
+                "window_ms": window_ms,
+            },
+        )
+        return True
+
+    if "StreamEnded" in event_types:
+        with PENDING_END_LOCK:
+            pending = PENDING_END_NOTIFICATIONS.pop(notify_key, None)
+        if pending is not None:
+            if pending.timer is not None:
+                pending.timer.cancel()
+            if "StreamEnded" in bucket.events:
+                pending.bucket.events["StreamEnded"] = bucket.events["StreamEnded"]
+            for request_id in bucket.request_ids:
+                if request_id not in pending.bucket.request_ids:
+                    pending.bucket.request_ids.append(request_id)
+            pending.bucket.payload_summaries.extend(bucket.payload_summaries)
+            pending.bucket.request_path = bucket.request_path
+            pending.bucket.remote_ip = bucket.remote_ip
+            pending.bucket.auth = bucket.auth
+            pending.bucket.target = bucket.target
+            pending.bucket.computed.clear()
+            deliver_aggregate_bucket(
+                cfg,
+                pending.bucket,
+                debounce_info={
+                    "mode": "pending_end_window",
+                    "status": "upgraded_to_stream_ended",
+                    "key": notify_key,
+                    "window_ms": window_ms,
+                },
+            )
+            return True
+
+        deliver_aggregate_bucket(
+            cfg,
+            bucket,
+            debounce_info={
+                "mode": "pending_end_window",
+                "status": "sent_immediately_no_pending",
+                "key": notify_key,
+                "window_ms": window_ms,
+            },
+        )
+        return True
+
+    with PENDING_END_LOCK:
+        pending = PENDING_END_NOTIFICATIONS.get(notify_key)
+        if pending and pending.expires_at > time.time():
+            message_record["forward_text"] = text
+            message_record["outcome"] = "suppressed"
+            message_record["debounce"] = {
+                "mode": "pending_end_window",
+                "status": "suppressed_duplicate_pending_end",
+                "key": notify_key,
+                "remaining_ms": int((pending.expires_at - time.time()) * 1000),
+            }
+            append_message_log(cfg, message_record)
+            eprint(
+                json.dumps(
+                    {
+                        "event": "aggregate_pending_end_duplicate_suppressed",
+                        "group_key": bucket.key,
+                        "group_name": bucket.group_name,
+                        "request_ids": bucket.request_ids,
+                        "debounce": message_record["debounce"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return True
+
+        timer = threading.Timer(window_ms / 1000, flush_pending_end_notification, args=(cfg, notify_key))
+        timer.daemon = True
+        PENDING_END_NOTIFICATIONS[notify_key] = PendingEndNotification(
+            key=notify_key,
+            bucket=bucket,
+            expires_at=time.time() + window_ms / 1000,
+            timer=timer,
+        )
+        timer.start()
+
+    message_record["forward_text"] = text
+    message_record["outcome"] = "held"
+    message_record["debounce"] = {
+        "mode": "pending_end_window",
+        "status": "held_pending_end",
+        "key": notify_key,
+        "window_ms": window_ms,
+    }
+    append_message_log(cfg, message_record)
+    eprint(
+        json.dumps(
+            {
+                "event": "aggregate_pending_end_held",
+                "group_key": bucket.key,
+                "group_name": bucket.group_name,
+                "request_ids": bucket.request_ids,
+                "debounce": message_record["debounce"],
+            },
+            ensure_ascii=False,
+        )
+    )
+    return True
+
+
+
+def flush_aggregate_bucket(cfg: Config, key: str) -> None:
+    with AGGREGATE_LOCK:
+        bucket = AGGREGATE_BUCKETS.pop(key, None)
+    if bucket is None:
+        return
+
+    handle_aggregate_notification(cfg, bucket)
 
 def queue_aggregate_event(cfg: Config, handler: BaseHTTPRequestHandler, parsed: urllib.parse.ParseResult, payload: dict[str, Any], auth: dict[str, Any], request_record: dict[str, Any], request_id: str, remote_ip: str) -> dict[str, Any] | None:
     group, window_ms = get_aggregate_group(cfg, handler, payload)
@@ -1518,7 +1667,7 @@ def parse_args() -> Config:
     ap.add_argument("--log-dir", default=os.getenv("WEBHOOK_LOG_DIR", "/logs"), help="消息日志目录；按 requests/messages/errors 三层写入 JSONL")
     ap.add_argument("--aggregate-window-ms", type=int, default=int(os.getenv("WEBHOOK_AGGREGATE_WINDOW_MS", "3000")), help="BililiveRecorder 事件聚合窗口（毫秒）；开始/结束类事件会在窗口内合并后统一发送")
     ap.add_argument("--notify-file-opening", action="store_true", default=os.getenv("WEBHOOK_NOTIFY_FILE_OPENING", "0") in {"1", "true", "True"}, help="是否单独发送 FileOpening 类事件；默认关闭，仅参与聚合")
-    ap.add_argument("--notify-debounce-ms", type=int, default=int(os.getenv("WEBHOOK_NOTIFY_DEBOUNCE_MS", "60000")), help="聚合消息通知级消抖窗口（毫秒）；同一 room/title 在窗口内只发第一条，后续视为抖动抑制")
+    ap.add_argument("--notify-debounce-ms", type=int, default=int(os.getenv("WEBHOOK_NOTIFY_DEBOUNCE_MS", "15000")), help="聚合消息尾声消抖窗口（毫秒）；end 类消息先挂起等待，窗口内若收到 StreamEnded 则升级为真正下播，否则到期按录制结束发送；窗口内抖动 start 会被抑制")
     args = ap.parse_args()
 
     private_target = args.private if args.private is not None else (int(private_env) if private_env else None)
