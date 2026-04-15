@@ -133,6 +133,8 @@ docker run -d \
 | `NAPCAT_RETRIES` | 重试次数 |
 | `WEBHOOK_RULES_PATH` | 规则文件路径，默认 `/app/rules.json` |
 | `WEBHOOK_LOG_DIR` | 消息日志目录，默认 `/logs`，按月分层写入 `requests-YYYY-MM.jsonl` / `messages-YYYY-MM.jsonl` / `errors-YYYY-MM.jsonl` |
+| `WEBHOOK_AGGREGATE_WINDOW_MS` | BililiveRecorder 事件聚合窗口（毫秒），默认 `3000` |
+| `WEBHOOK_NOTIFY_FILE_OPENING` | 是否单独发送 `FileOpening` 事件，默认 `0`（只参与聚合不单发） |
 | `QQ_CHUNK_SIZE` | QQ 单条消息长度上限 |
 | `TITLE_PREFIX` | 转发消息标题前缀 |
 | `INCLUDE_HEADERS` | 是否附带部分请求头信息 |
