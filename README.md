@@ -291,7 +291,14 @@ image: ghcr.io/etoile-7/webhook-to-napcat:latest
 - `file_path`
 - `file_name`
 - `duration`
+- `duration_seconds`
 - `file_size`
+- `file_size_bytes`
+- `recording`
+- `streaming`
+- `has_stream_ended`
+- `has_file_closed`
+- `has_session_ended`
 - `time`
 - `phase`
 - `group_name`
@@ -307,6 +314,7 @@ image: ghcr.io/etoile-7/webhook-to-napcat:latest
 - `event_order`：聚合上下文取值时的事件优先级
 - `suppress_event_types`：只参与聚合但不单独体现为通知的事件
 - `outputs`：按已收集到的 `event_types_*` 规则选择最终模板
+- `tail_suppress`：结束阶段的小尾巴过滤阈值；可按 `duration_seconds_max` / `file_size_bytes_max` / `interaction_count_max` / `bullet_count_max` / `sc_total_max` / `total_revenue_max` 等条件抑制明显无意义的尾声残片
 
 `outputs[*].match` 目前支持：
 
@@ -317,6 +325,13 @@ image: ghcr.io/etoile-7/webhook-to-napcat:latest
 - `field_in`
 
 这样以后改“开播啦 / 下播啦 / 时间放哪 / 哪几类事件合并 / 哪些事件 suppress”，都主要改本地 `rules.json`，不用再改 Python 源码。
+
+补充：`bililive_end` 结束阶段现在会在等待窗口内同时缓存：
+
+- `StreamEnded`（用于确认真正下播）
+- `FileClosed + SessionEnded` 这类带统计的结束候选
+
+最终会优先保留**信息更完整**的结束候选作为唯一对外通知；如果窗口里只出现 `StreamEnded`，则仍会用它作为兜底结束通知。对于时长很短、文件很小、互动极低、无营收的小尾巴，还可以通过 `tail_suppress` 规则直接压掉。
 
 ### 在模板里指定推送目标（支持多目标 / 按直播间路由）
 

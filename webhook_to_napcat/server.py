@@ -25,7 +25,6 @@ AGGREGATE_LOCK = threading.Lock()
 AGGREGATE_BUCKETS: dict[str, "AggregateBucket"] = {}
 PENDING_END_LOCK = threading.Lock()
 PENDING_END_NOTIFICATIONS: dict[str, "PendingEndNotification"] = {}
-RECENT_FINAL_END_UNTIL: dict[str, float] = {}
 PRICE_TABLE_CACHE: dict[str, dict[str, float]] = {}
 
 
@@ -73,9 +72,10 @@ class AggregateBucket:
 @dataclass
 class PendingEndNotification:
     key: str
-    bucket: AggregateBucket
+    bucket: AggregateBucket | None
     expires_at: float
     timer: threading.Timer | None = None
+    stream_end_bucket: AggregateBucket | None = None
 
 
 def eprint(*args: Any) -> None:
@@ -686,6 +686,41 @@ def format_count_k(value: Any) -> str:
 
 
 
+def safe_int(value: Any) -> int | None:
+    try:
+        if value in {None, ""}:
+            return None
+        return int(float(value))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+
+def safe_float(value: Any) -> float | None:
+    try:
+        if value in {None, ""}:
+            return None
+        return float(value)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+
+def safe_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "n", "off"}:
+            return False
+    return None
+
+
+
 def build_guard_increment_line(captain: int, commander: int, governor: int) -> str:
     parts: list[str] = []
     if captain > 0:
@@ -752,15 +787,23 @@ def compute_xml_live_stats(xml_path: Path, price_table_path: str | None = None, 
         "xml_path": str(xml_path),
         "xml_exists": False,
         "bullet_count": "",
+        "bullet_count_value": None,
         "bullet_count_display": "",
         "interaction_count": "",
+        "interaction_count_value": None,
         "interaction_count_display": "",
         "sc_count": "",
+        "sc_count_value": None,
         "sc_total": "",
+        "sc_total_value": None,
         "guard_count": "",
+        "guard_count_value": None,
         "guard_total": "",
+        "guard_total_value": None,
         "gift_total": "",
+        "gift_total_value": None,
         "total_revenue": "",
+        "total_revenue_value": None,
         "gift_unknown_count": 0,
         "gift_unknown_summary": "",
         "gift_unknown_line": "",
@@ -853,20 +896,28 @@ def compute_xml_live_stats(xml_path: Path, price_table_path: str | None = None, 
         {
             "xml_exists": True,
             "bullet_count": str(bullet_count),
+            "bullet_count_value": bullet_count,
             "bullet_count_display": format_count_k(bullet_count),
             "interaction_count": str(interaction_count),
+            "interaction_count_value": interaction_count,
             "interaction_count_display": format_count_k(interaction_count),
             "sc_count": str(sc_count),
+            "sc_count_value": sc_count,
             "sc_total": format_money(sc_total),
+            "sc_total_value": sc_total,
             "guard_count": str(guard_count),
+            "guard_count_value": guard_count,
             "captain_count": str(captain_count),
             "commander_count": str(commander_count),
             "governor_count": str(governor_count),
             "guard_increment_line": guard_increment_line,
             "guard_increment_line_block": f"\n{guard_increment_line}" if guard_increment_line else "",
             "guard_total": format_money(guard_total),
+            "guard_total_value": guard_total,
             "gift_total": format_money(gift_total),
+            "gift_total_value": gift_total,
             "total_revenue": format_money(total_revenue),
+            "total_revenue_value": total_revenue,
             "gift_unknown_count": len(gift_unknown),
             "gift_unknown_summary": gift_unknown_summary,
             "gift_unknown_line": f"\n未知礼物：{gift_unknown_summary}" if gift_unknown_summary else "",
@@ -892,14 +943,30 @@ def get_xml_live_stats(bucket: AggregateBucket, spec: dict[str, Any]) -> dict[st
         return {
             "xml_exists": False,
             "xml_path": "",
+            "bullet_count": "",
+            "bullet_count_value": None,
             "bullet_count_display": "",
+            "interaction_count": "",
+            "interaction_count_value": None,
             "interaction_count_display": "",
+            "sc_count": "",
+            "sc_count_value": None,
+            "sc_total": "",
+            "sc_total_value": None,
             "captain_count": "",
             "commander_count": "",
             "governor_count": "",
+            "guard_count": "",
+            "guard_count_value": None,
             "guard_increment_line": "",
             "guard_increment_line_block": "",
+            "guard_total": "",
+            "guard_total_value": None,
+            "gift_total": "",
+            "gift_total_value": None,
             "gift_unknown_line": "",
+            "total_revenue": "",
+            "total_revenue_value": None,
             "gift_total_label": "礼物营收",
             "total_revenue_label": "总营收",
         }
@@ -1078,6 +1145,10 @@ def build_aggregate_context(bucket: AggregateBucket) -> dict[str, Any]:
     area_parent = get_bucket_field_value(bucket, "EventData.AreaNameParent")
     area_child = get_bucket_field_value(bucket, "EventData.AreaNameChild")
     relative_path = get_bucket_field_value(bucket, "EventData.RelativePath")
+    duration_raw = get_bucket_field_value(bucket, "EventData.Duration")
+    file_size_raw = get_bucket_field_value(bucket, "EventData.FileSize")
+    recording_raw = get_bucket_field_value(bucket, "EventData.Recording")
+    streaming_raw = get_bucket_field_value(bucket, "EventData.Streaming")
     ctx.update(
         {
             "name": get_bucket_field_value(bucket, "EventData.Name") or "未知主播",
@@ -1090,8 +1161,15 @@ def build_aggregate_context(bucket: AggregateBucket) -> dict[str, Any]:
             "area": "/".join(str(item) for item in [area_parent, area_child] if item not in {None, ""}),
             "file_path": relative_path,
             "file_name": truncate_value(get_file_name(relative_path), 84),
-            "duration": format_duration_human(get_bucket_field_value(bucket, "EventData.Duration")),
-            "file_size": format_bytes_human(get_bucket_field_value(bucket, "EventData.FileSize")),
+            "duration": format_duration_human(duration_raw),
+            "duration_seconds": safe_float(duration_raw),
+            "file_size": format_bytes_human(file_size_raw),
+            "file_size_bytes": safe_int(file_size_raw),
+            "recording": safe_bool(recording_raw),
+            "streaming": safe_bool(streaming_raw),
+            "has_stream_ended": "StreamEnded" in bucket.events,
+            "has_file_closed": "FileClosed" in bucket.events,
+            "has_session_ended": "SessionEnded" in bucket.events,
             "time": get_bucket_display_time(bucket),
         }
     )
@@ -1295,6 +1373,140 @@ def build_aggregate_message_record(bucket: AggregateBucket, aggregate_meta: dict
 
 
 
+def merge_aggregate_bucket(target: AggregateBucket, source: AggregateBucket | None) -> AggregateBucket:
+    if source is None:
+        return target
+
+    for event_type, event in source.events.items():
+        target.events[event_type] = event
+    for request_id in source.request_ids:
+        if request_id not in target.request_ids:
+            target.request_ids.append(request_id)
+    target.payload_summaries.extend(source.payload_summaries)
+    target.request_path = source.request_path
+    target.remote_ip = source.remote_ip
+    target.auth = source.auth
+    target.target = source.target
+    target.computed.clear()
+    return target
+
+
+
+def get_xml_metrics_for_bucket(bucket: AggregateBucket) -> dict[str, Any]:
+    context_spec = bucket.group_config.get("context")
+    if isinstance(context_spec, dict):
+        for spec in context_spec.values():
+            if isinstance(spec, dict) and spec.get("source") == "xml_live_stats":
+                return get_xml_live_stats(bucket, spec)
+    return {}
+
+
+
+def build_end_bucket_metrics(bucket: AggregateBucket) -> dict[str, Any]:
+    context = build_aggregate_context(bucket)
+    xml_metrics = get_xml_metrics_for_bucket(bucket)
+    return {
+        "xml_exists": bool(xml_metrics.get("xml_exists")),
+        "duration_seconds": safe_float(context.get("duration_seconds")),
+        "file_size_bytes": safe_int(context.get("file_size_bytes")),
+        "interaction_count_value": safe_int(xml_metrics.get("interaction_count_value")),
+        "bullet_count_value": safe_int(xml_metrics.get("bullet_count_value")),
+        "sc_total_value": safe_float(xml_metrics.get("sc_total_value")),
+        "total_revenue_value": safe_float(xml_metrics.get("total_revenue_value")),
+        "streaming": context.get("streaming"),
+        "recording": context.get("recording"),
+        "has_stream_ended": bool(context.get("has_stream_ended")),
+        "has_file_closed": bool(context.get("has_file_closed")),
+        "has_session_ended": bool(context.get("has_session_ended")),
+    }
+
+
+
+def build_end_bucket_score(bucket: AggregateBucket) -> tuple[int, int, int, int, int, int, int]:
+    metrics = build_end_bucket_metrics(bucket)
+    interaction_count = safe_int(metrics.get("interaction_count_value"))
+    bullet_count = safe_int(metrics.get("bullet_count_value"))
+    file_size_bytes = safe_int(metrics.get("file_size_bytes"))
+    return (
+        1 if metrics.get("has_file_closed") else 0,
+        1 if metrics.get("xml_exists") else 0,
+        interaction_count if interaction_count is not None else -1,
+        bullet_count if bullet_count is not None else -1,
+        int(round((safe_float(metrics.get("total_revenue_value")) or 0.0) * 100)),
+        int(round(safe_float(metrics.get("duration_seconds")) or 0.0)),
+        file_size_bytes if file_size_bytes is not None else -1,
+    )
+
+
+
+def is_end_candidate_bucket(bucket: AggregateBucket) -> bool:
+    return bool(set(bucket.events.keys()) & {"FileClosed", "SessionEnded"})
+
+
+
+def get_end_tail_suppress_policy(bucket: AggregateBucket) -> dict[str, Any] | None:
+    raw = bucket.group_config.get("tail_suppress")
+    if isinstance(raw, dict):
+        if raw.get("enabled") is False:
+            return None
+        return {
+            "require_streaming_false": safe_bool(raw.get("require_streaming_false")) if raw.get("require_streaming_false") is not None else True,
+            "duration_seconds_max": safe_float(raw.get("duration_seconds_max")),
+            "file_size_bytes_max": safe_int(raw.get("file_size_bytes_max")),
+            "interaction_count_max": safe_int(raw.get("interaction_count_max")),
+            "bullet_count_max": safe_int(raw.get("bullet_count_max")),
+            "sc_total_max": safe_float(raw.get("sc_total_max")),
+            "total_revenue_max": safe_float(raw.get("total_revenue_max")),
+        }
+
+    if bucket.group_name != "bililive_end":
+        return None
+
+    return {
+        "require_streaming_false": True,
+        "duration_seconds_max": 15.0,
+        "file_size_bytes_max": 5 * 1024 * 1024,
+        "interaction_count_max": 20,
+        "bullet_count_max": 30,
+        "sc_total_max": 0.0,
+        "total_revenue_max": 0.0,
+    }
+
+
+
+def is_trivial_trailing_end_bucket(bucket: AggregateBucket) -> bool:
+    policy = get_end_tail_suppress_policy(bucket)
+    if not policy:
+        return False
+
+    metrics = build_end_bucket_metrics(bucket)
+    checks: list[bool] = []
+
+    if policy.get("require_streaming_false"):
+        if metrics.get("streaming") is not False:
+            return False
+        checks.append(True)
+
+    threshold_fields = {
+        "duration_seconds": policy.get("duration_seconds_max"),
+        "file_size_bytes": policy.get("file_size_bytes_max"),
+        "interaction_count_value": policy.get("interaction_count_max"),
+        "bullet_count_value": policy.get("bullet_count_max"),
+        "sc_total_value": policy.get("sc_total_max"),
+        "total_revenue_value": policy.get("total_revenue_max"),
+    }
+    for field, max_value in threshold_fields.items():
+        if max_value is None:
+            continue
+        value = metrics.get(field)
+        if value is None:
+            return False
+        checks.append(value <= max_value)
+
+    return bool(checks) and all(checks)
+
+
+
 def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info: dict[str, Any] | None = None) -> None:
     text, aggregate_meta = build_aggregate_message(bucket)
     message_record = build_aggregate_message_record(bucket, aggregate_meta)
@@ -1363,24 +1575,27 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info
 
 
 
-def mark_recent_final_end(notify_key: str, window_ms: int) -> None:
-    with PENDING_END_LOCK:
-        RECENT_FINAL_END_UNTIL[notify_key] = time.time() + max(0, window_ms) / 1000
-
-
-
 def flush_pending_end_notification(cfg: Config, notify_key: str) -> None:
     with PENDING_END_LOCK:
         pending = PENDING_END_NOTIFICATIONS.pop(notify_key, None)
     if pending is None:
         return
 
+    bucket = pending.bucket
+    if bucket is None:
+        bucket = pending.stream_end_bucket
+    elif pending.stream_end_bucket is not None and pending.stream_end_bucket is not bucket:
+        merge_aggregate_bucket(bucket, pending.stream_end_bucket)
+
+    if bucket is None:
+        return
+
     deliver_aggregate_bucket(
         cfg,
-        pending.bucket,
+        bucket,
         debounce_info={
             "mode": "pending_end_window",
-            "status": "expired_forwarded",
+            "status": "expired_forwarded_after_stream_end" if pending.stream_end_bucket is not None else "expired_forwarded",
             "key": notify_key,
             "window_ms": max(0, int(cfg.notify_debounce_ms or 0)),
         },
@@ -1410,9 +1625,6 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
     now_ts = time.time()
     with PENDING_END_LOCK:
         expired_keys = [key for key, pending in PENDING_END_NOTIFICATIONS.items() if pending.expires_at <= now_ts]
-        expired_final_keys = [key for key, expiry in RECENT_FINAL_END_UNTIL.items() if expiry <= now_ts]
-        for expired_final_key in expired_final_keys:
-            RECENT_FINAL_END_UNTIL.pop(expired_final_key, None)
     for expired_key in expired_keys:
         flush_pending_end_notification(cfg, expired_key)
 
@@ -1455,88 +1667,56 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
         )
         return True
 
-    if "StreamEnded" in event_types:
-        with PENDING_END_LOCK:
-            pending = PENDING_END_NOTIFICATIONS.pop(notify_key, None)
-        mark_recent_final_end(notify_key, window_ms)
-        if pending is not None:
-            if pending.timer is not None:
-                pending.timer.cancel()
-            if "StreamEnded" in bucket.events:
-                pending.bucket.events["StreamEnded"] = bucket.events["StreamEnded"]
-            for request_id in bucket.request_ids:
-                if request_id not in pending.bucket.request_ids:
-                    pending.bucket.request_ids.append(request_id)
-            pending.bucket.payload_summaries.extend(bucket.payload_summaries)
-            pending.bucket.request_path = bucket.request_path
-            pending.bucket.remote_ip = bucket.remote_ip
-            pending.bucket.auth = bucket.auth
-            pending.bucket.target = bucket.target
-            pending.bucket.computed.clear()
-            deliver_aggregate_bucket(
-                cfg,
-                pending.bucket,
-                debounce_info={
-                    "mode": "pending_end_window",
-                    "status": "upgraded_to_stream_ended",
-                    "key": notify_key,
-                    "window_ms": window_ms,
-                },
-            )
-            return True
-
-        deliver_aggregate_bucket(
-            cfg,
-            bucket,
-            debounce_info={
-                "mode": "pending_end_window",
-                "status": "sent_immediately_no_pending",
-                "key": notify_key,
-                "window_ms": window_ms,
-            },
-        )
-        return True
-
+    created_pending = False
     with PENDING_END_LOCK:
         pending = PENDING_END_NOTIFICATIONS.get(notify_key)
-        final_end_until = RECENT_FINAL_END_UNTIL.get(notify_key)
-        if pending and pending.expires_at > time.time():
+        if pending is None or pending.expires_at <= time.time():
+            timer = threading.Timer(window_ms / 1000, flush_pending_end_notification, args=(cfg, notify_key))
+            timer.daemon = True
+            pending = PendingEndNotification(
+                key=notify_key,
+                bucket=None,
+                expires_at=time.time() + window_ms / 1000,
+                timer=timer,
+            )
+            PENDING_END_NOTIFICATIONS[notify_key] = pending
+            timer.start()
+            created_pending = True
+
+    if "StreamEnded" in event_types:
+        with PENDING_END_LOCK:
+            if pending.stream_end_bucket is None:
+                pending.stream_end_bucket = bucket
+            elif pending.stream_end_bucket is not bucket:
+                merge_aggregate_bucket(pending.stream_end_bucket, bucket)
+            if pending.bucket is not None and pending.stream_end_bucket is not pending.bucket:
+                merge_aggregate_bucket(pending.bucket, pending.stream_end_bucket)
+
+    if is_end_candidate_bucket(bucket):
+        candidate_bucket = bucket
+        if pending.stream_end_bucket is not None and pending.stream_end_bucket is not candidate_bucket:
+            merge_aggregate_bucket(candidate_bucket, pending.stream_end_bucket)
+
+        previous_bucket = pending.bucket
+        previous_score = build_end_bucket_score(previous_bucket) if previous_bucket is not None else None
+        candidate_score = build_end_bucket_score(candidate_bucket)
+
+        if previous_bucket is not None and pending.stream_end_bucket is not None and is_trivial_trailing_end_bucket(candidate_bucket) and candidate_score <= previous_score:
             message_record["forward_text"] = text
             message_record["outcome"] = "suppressed"
             message_record["debounce"] = {
                 "mode": "pending_end_window",
-                "status": "suppressed_duplicate_pending_end",
+                "status": "suppressed_trivial_trailing_end",
                 "key": notify_key,
                 "remaining_ms": int((pending.expires_at - time.time()) * 1000),
+                "candidate_score": list(candidate_score),
+                "kept_score": list(previous_score),
             }
             append_message_log(cfg, message_record)
             eprint(
                 json.dumps(
                     {
-                        "event": "aggregate_pending_end_duplicate_suppressed",
-                        "group_key": bucket.key,
-                        "group_name": bucket.group_name,
-                        "request_ids": bucket.request_ids,
-                        "debounce": message_record["debounce"],
-                    },
-                    ensure_ascii=False,
-                )
-            )
-            return True
-        if final_end_until and final_end_until > time.time():
-            message_record["forward_text"] = text
-            message_record["outcome"] = "suppressed"
-            message_record["debounce"] = {
-                "mode": "pending_end_window",
-                "status": "suppressed_after_final_stream_end",
-                "key": notify_key,
-                "remaining_ms": int((final_end_until - time.time()) * 1000),
-            }
-            append_message_log(cfg, message_record)
-            eprint(
-                json.dumps(
-                    {
-                        "event": "aggregate_post_final_end_suppressed",
+                        "event": "aggregate_pending_end_trivial_tail_suppressed",
                         "group_key": bucket.key,
                         "group_name": bucket.group_name,
                         "request_ids": bucket.request_ids,
@@ -1547,24 +1727,50 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
             )
             return True
 
-        timer = threading.Timer(window_ms / 1000, flush_pending_end_notification, args=(cfg, notify_key))
-        timer.daemon = True
-        PENDING_END_NOTIFICATIONS[notify_key] = PendingEndNotification(
-            key=notify_key,
-            bucket=bucket,
-            expires_at=time.time() + window_ms / 1000,
-            timer=timer,
-        )
-        timer.start()
+        if previous_bucket is None or candidate_score > previous_score:
+            pending.bucket = candidate_bucket
+            status = "held_pending_end_candidate" if previous_bucket is None else "replaced_pending_end_candidate"
+        else:
+            message_record["forward_text"] = text
+            message_record["outcome"] = "suppressed"
+            message_record["debounce"] = {
+                "mode": "pending_end_window",
+                "status": "suppressed_weaker_pending_end_candidate",
+                "key": notify_key,
+                "remaining_ms": int((pending.expires_at - time.time()) * 1000),
+                "candidate_score": list(candidate_score),
+                "kept_score": list(previous_score),
+            }
+            append_message_log(cfg, message_record)
+            eprint(
+                json.dumps(
+                    {
+                        "event": "aggregate_pending_end_weaker_candidate_suppressed",
+                        "group_key": bucket.key,
+                        "group_name": bucket.group_name,
+                        "request_ids": bucket.request_ids,
+                        "debounce": message_record["debounce"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return True
+    elif "StreamEnded" in event_types:
+        status = "held_stream_end_waiting_for_stats" if pending.bucket is None else "merged_stream_end_into_pending"
+    else:
+        status = "held_pending_end"
 
     message_record["forward_text"] = text
     message_record["outcome"] = "held"
     message_record["debounce"] = {
         "mode": "pending_end_window",
-        "status": "held_pending_end",
+        "status": status,
         "key": notify_key,
         "window_ms": window_ms,
+        "remaining_ms": int((pending.expires_at - time.time()) * 1000),
     }
+    if created_pending:
+        message_record["debounce"]["created_pending"] = True
     append_message_log(cfg, message_record)
     eprint(
         json.dumps(
@@ -1846,7 +2052,7 @@ def parse_args() -> Config:
     ap.add_argument("--log-dir", default=os.getenv("WEBHOOK_LOG_DIR", "/logs"), help="消息日志目录；按 requests/messages/errors 三层写入 JSONL")
     ap.add_argument("--aggregate-window-ms", type=int, default=int(os.getenv("WEBHOOK_AGGREGATE_WINDOW_MS", "3000")), help="BililiveRecorder 事件聚合窗口（毫秒）；开始/结束类事件会在窗口内合并后统一发送")
     ap.add_argument("--notify-file-opening", action="store_true", default=os.getenv("WEBHOOK_NOTIFY_FILE_OPENING", "0") in {"1", "true", "True"}, help="是否单独发送 FileOpening 类事件；默认关闭，仅参与聚合")
-    ap.add_argument("--notify-debounce-ms", type=int, default=int(os.getenv("WEBHOOK_NOTIFY_DEBOUNCE_MS", "15000")), help="聚合消息尾声消抖窗口（毫秒）；end 类消息先挂起等待，窗口内若收到 StreamEnded 则升级为真正下播，否则到期按录制结束发送；窗口内抖动 start 会被抑制")
+    ap.add_argument("--notify-debounce-ms", type=int, default=int(os.getenv("WEBHOOK_NOTIFY_DEBOUNCE_MS", "15000")), help="聚合消息结束阶段等待窗口（毫秒）；窗口内会缓存 StreamEnded 与候选结束统计，优先保留信息更完整的那条最终下发，并抑制尾声抖动 start / 空尾巴")
     args = ap.parse_args()
 
     private_target = args.private if args.private is not None else (int(private_env) if private_env else None)
