@@ -278,6 +278,62 @@ image: ghcr.io/etoile-7/webhook-to-napcat:latest
 }
 ```
 
+输出类型除了 `template` / `field` / `summary` 外，现在还支持 `segments`：
+
+- `text` 段：发送文字
+- `image` 段：发送图片，`file` 支持 `http(s)://...`、`base64://...` 等 NapCat / OneBot 可识别地址
+- 如果 rich media 发送失败，可用 `fallback_template` 自动退回纯文本
+
+示例：开播时发送“文字 + 图片 + 文字”：
+
+```json
+{
+  "output": {
+    "type": "segments",
+    "segments": [
+      { "type": "text", "text": "🟢［{name}］开播啦！" },
+      { "type": "image", "file": "{cover_base64}" },
+      { "type": "text", "text": "标题：{title}\n分区：{area}\n房间：{room_id}\n时间：{time}" }
+    ],
+    "fallback_template": "🟢［{name}］开播啦！\n标题：{title}\n分区：{area}\n房间：{room_id}\n时间：{time}"
+  }
+}
+```
+
+聚合 `context` 里除了直接取字段外，还支持一些额外来源：
+
+- `source: "template"`：把上下文再次格式化成新字段
+- `source: "xml_live_stats"`：从 XML 统计里取值
+- `source: "local_file_base64"`：读取本地文件并编码成 `base64://...`
+- `source: "room_cover_base64"`：按 `room_id` 从封面索引里读取本地封面并编码成 `base64://...`
+
+静态直播间封面示例：
+
+```json
+{
+  "context": {
+    "cover_base64": {
+      "source": "room_cover_base64",
+      "index_path": "/opt/WebhookToNapcat/cover/index.json"
+    }
+  }
+}
+```
+
+可以配合仓库里的抓取脚本，先把常用直播间封面落盘到宿主机：
+
+```bash
+python3 scripts/fetch_bilibili_room_covers.py \
+  --output-dir /opt/WebhookToNapcat/cover \
+  --room 22632424:贝拉kira \
+  --room 22637261:嘉然今天吃什么
+```
+
+脚本会生成：
+
+- `/opt/WebhookToNapcat/cover/<room_id>.<ext>`
+- `/opt/WebhookToNapcat/cover/index.json`
+
 目前聚合模板可用的上下文字段包括：
 
 - `name`

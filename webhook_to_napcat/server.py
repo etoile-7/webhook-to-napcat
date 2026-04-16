@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -26,6 +28,7 @@ AGGREGATE_BUCKETS: dict[str, "AggregateBucket"] = {}
 PENDING_END_LOCK = threading.Lock()
 PENDING_END_NOTIFICATIONS: dict[str, "PendingEndNotification"] = {}
 PRICE_TABLE_CACHE: dict[str, dict[str, float]] = {}
+BILIBILI_ROOM_INFO_CACHE: dict[str, dict[str, Any]] = {}
 
 
 @dataclass
@@ -138,6 +141,69 @@ def post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeou
             if i < retries:
                 time.sleep(0.4 * (2**i))
     raise RuntimeError(f"POST failed after retries: {last}")
+
+
+
+def fetch_text(url: str, headers: dict[str, str] | None = None, timeout: float = 10.0, retries: int = 1) -> str:
+    last = None
+    request_headers = headers or {}
+    for i in range(retries + 1):
+        try:
+            req = urllib.request.Request(url, headers=request_headers, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if i < retries:
+                time.sleep(0.4 * (2**i))
+    raise RuntimeError(f"GET failed after retries: {last}")
+
+
+
+def napcat_response_ok(response: Any) -> bool:
+    if not isinstance(response, dict):
+        return False
+    retcode = response.get("retcode")
+    status = str(response.get("status") or "").lower()
+    if retcode == 0:
+        return True
+    return status == "ok" and retcode in {None, "", 0}
+
+
+
+def file_to_base64_uri(path: str) -> str | None:
+    try:
+        data = Path(path).read_bytes()
+    except Exception:  # noqa: BLE001
+        return None
+    if not data:
+        return None
+    return "base64://" + base64.b64encode(data).decode("ascii")
+
+
+
+def load_room_cover_index(index_path: str = "/opt/WebhookToNapcat/cover/index.json") -> dict[str, Any]:
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:  # noqa: BLE001
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+
+def resolve_room_cover_path(room_id: Any, index_path: str = "/opt/WebhookToNapcat/cover/index.json") -> str | None:
+    room_id_str = str(room_id or "").strip()
+    if not room_id_str:
+        return None
+    index = load_room_cover_index(index_path=index_path)
+    record = index.get(room_id_str)
+    if not isinstance(record, dict):
+        return None
+    path_value = record.get("path")
+    if not isinstance(path_value, str) or not path_value.strip():
+        return None
+    return path_value.strip()
 
 
 
@@ -294,8 +360,93 @@ def send_text_to_napcat(cfg: Config, text: str, targets: list[dict[str, int]] | 
             payload = dict(target_payload)
             payload["message"] = [{"type": "text", "data": {"text": chunk}}]
             response = post_json(url, payload, headers=headers, timeout=cfg.timeout, retries=cfg.retries)
+            if not napcat_response_ok(response):
+                raise RuntimeError(f"NapCat text send failed: {json.dumps(response, ensure_ascii=False)}")
             results.append({"target": target, "response": response})
     return results, chunks, resolved_targets
+
+
+
+def send_segments_to_napcat(cfg: Config, segments: list[dict[str, Any]], targets: list[dict[str, int]] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, int]]]:
+    resolved_targets = targets or default_target_specs(cfg)
+    if not resolved_targets:
+        raise RuntimeError("no NapCat targets resolved")
+
+    results: list[dict[str, Any]] = []
+    for target in resolved_targets:
+        url, headers, _, target_payload = build_napcat_request(cfg, target)
+        payload = dict(target_payload)
+        payload["message"] = json.loads(json.dumps(segments, ensure_ascii=False))
+        response = post_json(url, payload, headers=headers, timeout=cfg.timeout, retries=cfg.retries)
+        if not napcat_response_ok(response):
+            raise RuntimeError(f"NapCat segment send failed: {json.dumps(response, ensure_ascii=False)}")
+        results.append({"target": target, "response": response})
+    return results, resolved_targets
+
+
+
+def get_rendered_message_preview(message: dict[str, Any] | None) -> str | None:
+    if not isinstance(message, dict):
+        return None
+    mode = str(message.get("mode") or "text")
+    if mode == "text":
+        text = message.get("text")
+        return text.strip() if isinstance(text, str) and text.strip() else None
+
+    fallback_text = message.get("fallback_text")
+    if isinstance(fallback_text, str) and fallback_text.strip():
+        return fallback_text.strip()
+
+    parts: list[str] = []
+    for segment in message.get("segments") or []:
+        if isinstance(segment, dict) and segment.get("type") == "text":
+            text = ((segment.get("data") or {}).get("text") if isinstance(segment.get("data"), dict) else None)
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    return "\n".join(parts).strip() or None
+
+
+
+def send_rendered_message_to_napcat(cfg: Config, message: dict[str, Any], targets: list[dict[str, int]] | None = None) -> dict[str, Any]:
+    mode = str(message.get("mode") or "text")
+    if mode == "segments":
+        segments = message.get("segments") if isinstance(message.get("segments"), list) else []
+        if not segments:
+            raise RuntimeError("rendered segments message is empty")
+        try:
+            results, resolved_targets = send_segments_to_napcat(cfg, segments, targets=targets)
+            return {
+                "mode": "segments",
+                "results": results,
+                "resolved_targets": resolved_targets,
+                "chunks": [],
+                "used_fallback": False,
+            }
+        except Exception as exc:  # noqa: BLE001
+            fallback_text = message.get("fallback_text")
+            if not isinstance(fallback_text, str) or not fallback_text.strip():
+                raise
+            results, chunks, resolved_targets = send_text_to_napcat(cfg, fallback_text, targets=targets)
+            return {
+                "mode": "text",
+                "results": results,
+                "resolved_targets": resolved_targets,
+                "chunks": chunks,
+                "used_fallback": True,
+                "fallback_reason": str(exc),
+            }
+
+    text = message.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("rendered text message is empty")
+    results, chunks, resolved_targets = send_text_to_napcat(cfg, text, targets=targets)
+    return {
+        "mode": "text",
+        "results": results,
+        "resolved_targets": resolved_targets,
+        "chunks": chunks,
+        "used_fallback": False,
+    }
 
 
 
@@ -430,35 +581,105 @@ def rule_matches(rule: dict[str, Any], handler: BaseHTTPRequestHandler, payload:
 
 
 
-def render_rule_output(rule: dict[str, Any], payload: Any) -> str | None:
+def render_template_text(template: Any, payload: Any) -> str | None:
+    if template is None:
+        return None
+    if not isinstance(template, str):
+        return str(template)
+
+    raw_template = template
+    template = template.strip()
+    if not template:
+        return None
+    if isinstance(payload, dict):
+        flat = {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v) for k, v in payload.items()}
+        try:
+            return raw_template.format(**flat).strip()
+        except Exception:  # noqa: BLE001
+            return template
+    return template
+
+
+
+def build_rendered_text_message(text: str | None) -> dict[str, Any] | None:
+    if not isinstance(text, str) or not text.strip():
+        return None
+    return {"mode": "text", "text": text.strip()}
+
+
+
+def render_message_segment(spec: Any, payload: Any) -> dict[str, Any] | None:
+    if not isinstance(spec, dict):
+        return None
+
+    segment_type = str(spec.get("type") or "").strip().lower()
+    if not segment_type:
+        return None
+
+    if segment_type == "text":
+        text = render_template_text(spec.get("text") or spec.get("template"), payload)
+        if not text:
+            return None
+        return {"type": "text", "data": {"text": text}}
+
+    if segment_type == "image":
+        file_value = render_template_text(spec.get("file"), payload)
+        if not file_value:
+            return None
+        data: dict[str, Any] = {"file": file_value}
+        if spec.get("proxy") is not None:
+            data["proxy"] = 1 if safe_bool(spec.get("proxy")) else 0
+        if spec.get("cache") is not None:
+            data["cache"] = 1 if safe_bool(spec.get("cache")) else 0
+        if spec.get("timeout") is not None:
+            timeout_value = safe_int(spec.get("timeout"))
+            if timeout_value is not None:
+                data["timeout"] = timeout_value
+        return {"type": "image", "data": data}
+
+    return None
+
+
+
+def render_rule_output(rule: dict[str, Any], payload: Any) -> dict[str, Any] | None:
     output = rule.get("output")
     if not isinstance(output, dict):
         return None
 
-    kind = output.get("type", "summary")
+    kind = str(output.get("type", "summary") or "summary").strip().lower()
     if kind == "field":
         field = str(output.get("field", "")).strip()
         value = get_field_value(payload, field) if field else None
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return {"mode": "text", "text": value.strip()}
         if value is not None:
-            return str(value)
+            return {"mode": "text", "text": str(value)}
         return None
 
     if kind == "template":
-        template = str(output.get("template", "")).strip()
-        if not template:
-            return None
-        if isinstance(payload, dict):
-            flat = {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v) for k, v in payload.items()}
-            try:
-                return template.format(**flat).strip()
-            except Exception:  # noqa: BLE001
-                return template
-        return template
+        return build_rendered_text_message(render_template_text(output.get("template", ""), payload))
 
     if kind == "summary":
-        return summarize_payload(payload).strip()
+        return build_rendered_text_message(summarize_payload(payload).strip())
+
+    if kind == "segments":
+        segments_spec = output.get("segments")
+        if not isinstance(segments_spec, list):
+            return None
+        segments: list[dict[str, Any]] = []
+        for item in segments_spec:
+            segment = render_message_segment(item, payload)
+            if segment is not None:
+                segments.append(segment)
+
+        fallback_text = render_template_text(output.get("fallback_template"), payload)
+        if not segments:
+            return build_rendered_text_message(fallback_text)
+        return {
+            "mode": "segments",
+            "segments": segments,
+            "fallback_text": fallback_text.strip() if isinstance(fallback_text, str) and fallback_text.strip() else None,
+        }
 
     return None
 
@@ -478,7 +699,7 @@ def get_rule_targets_spec(rule: dict[str, Any]) -> Any:
 
 
 
-def apply_rules(cfg: Config, handler: BaseHTTPRequestHandler, payload: Any) -> tuple[str | None, list[dict[str, int]] | None]:
+def apply_rules(cfg: Config, handler: BaseHTTPRequestHandler, payload: Any) -> tuple[dict[str, Any] | None, list[dict[str, int]] | None]:
     rules_doc = load_rules(cfg.rules_path)
     rules = rules_doc.get("rules")
     if isinstance(rules, list):
@@ -503,10 +724,10 @@ def apply_rules(cfg: Config, handler: BaseHTTPRequestHandler, payload: Any) -> t
 
 
 
-def build_forward_text(cfg: Config, handler: BaseHTTPRequestHandler, payload: Any) -> tuple[str, list[dict[str, int]]]:
-    rules_text, rule_targets = apply_rules(cfg, handler, payload)
-    if rules_text:
-        return rules_text, (rule_targets or default_target_specs(cfg))
+def build_forward_message(cfg: Config, handler: BaseHTTPRequestHandler, payload: Any) -> tuple[dict[str, Any], list[dict[str, int]]]:
+    rendered, rule_targets = apply_rules(cfg, handler, payload)
+    if rendered:
+        return rendered, (rule_targets or default_target_specs(cfg))
 
     parsed = urllib.parse.urlparse(handler.path)
     title = f"{cfg.title_prefix} 收到新 webhook"
@@ -522,7 +743,7 @@ def build_forward_text(cfg: Config, handler: BaseHTTPRequestHandler, payload: An
             lines.append(f"UA: {ua}")
     lines.append("")
     lines.append(summarize_payload(payload))
-    return "\n".join(lines).strip(), default_target_specs(cfg)
+    return {"mode": "text", "text": "\n".join(lines).strip()}, default_target_specs(cfg)
 
 
 
@@ -1016,10 +1237,103 @@ def get_bucket_field_value(bucket: AggregateBucket, field: str) -> Any:
 
 
 
+def extract_bilibili_room_info_from_html(html: str) -> dict[str, Any]:
+    if not isinstance(html, str) or not html.strip():
+        return {}
+
+    match = re.search(r"__NEPTUNE_IS_MY_WAIFU__\s*=\s*(\{.*?\})\s*</script>", html, re.S)
+    if not match:
+        cover_match = re.search(r'"cover"\s*:\s*"([^"]+)"', html)
+        if cover_match:
+            try:
+                return {"cover": json.loads('"' + cover_match.group(1) + '"')}
+            except Exception:  # noqa: BLE001
+                return {"cover": cover_match.group(1)}
+        return {}
+
+    try:
+        data = json.loads(match.group(1))
+    except Exception:  # noqa: BLE001
+        return {}
+
+    room_info = get_field_value(data, "roomInfoRes.data.room_info")
+    return room_info if isinstance(room_info, dict) else {}
+
+
+
+def fetch_bilibili_room_info(room_id: Any, timeout: float = 10.0, retries: int = 1) -> dict[str, Any]:
+    room_id_str = str(room_id or "").strip()
+    if not room_id_str:
+        return {}
+
+    page_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+        "Referer": f"https://live.bilibili.com/{room_id_str}",
+        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+    }
+
+    api_url = f"https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom?room_id={urllib.parse.quote(room_id_str)}"
+    try:
+        raw = fetch_text(api_url, headers=page_headers, timeout=timeout, retries=retries)
+        api_obj = json.loads(raw)
+        room_info = get_field_value(api_obj, "data.room_info")
+        if isinstance(room_info, dict) and room_info:
+            return room_info
+    except Exception:  # noqa: BLE001
+        pass
+
+    html = fetch_text(f"https://live.bilibili.com/{urllib.parse.quote(room_id_str)}", headers=page_headers, timeout=timeout, retries=retries)
+    return extract_bilibili_room_info_from_html(html)
+
+
+
+def get_bilibili_room_info(bucket: AggregateBucket, spec: dict[str, Any]) -> dict[str, Any]:
+    room_id_field = str(spec.get("room_id_field") or "EventData.RoomId")
+    room_id = get_bucket_field_value(bucket, room_id_field)
+    if room_id in {None, ""}:
+        return {}
+
+    room_id_str = str(room_id)
+    cache_ttl_seconds = max(0, safe_int(spec.get("cache_ttl_seconds")) or 300)
+    timeout = safe_float(spec.get("timeout")) or 10.0
+    retries = max(0, safe_int(spec.get("retries")) or 1)
+    cache_key = f"bilibili_room_info:{room_id_str}"
+    now_ts = time.time()
+
+    cached = bucket.computed.get(cache_key)
+    if isinstance(cached, dict) and cached.get("expires_at", 0) > now_ts and isinstance(cached.get("data"), dict):
+        return cached["data"]
+
+    global_cached = BILIBILI_ROOM_INFO_CACHE.get(cache_key)
+    if isinstance(global_cached, dict) and global_cached.get("expires_at", 0) > now_ts and isinstance(global_cached.get("data"), dict):
+        bucket.computed[cache_key] = global_cached
+        return global_cached["data"]
+
+    room_info = fetch_bilibili_room_info(room_id_str, timeout=timeout, retries=retries)
+    cache_record = {"expires_at": now_ts + cache_ttl_seconds, "data": room_info}
+    bucket.computed[cache_key] = cache_record
+    BILIBILI_ROOM_INFO_CACHE[cache_key] = cache_record
+    return room_info
+
+
+
 def truncate_value(value: Any, max_len: int) -> Any:
     if not isinstance(value, str):
         return value
     return truncate_middle(value, max_len=max_len)
+
+
+
+def sanitize_log_value(value: Any, max_len: int = 240) -> Any:
+    if isinstance(value, str):
+        if value.startswith("base64://"):
+            return f"<base64:{max(0, len(value) - len('base64://'))} chars>"
+        return truncate_value(value, max_len=max_len)
+    if isinstance(value, list):
+        return [sanitize_log_value(item, max_len=max_len) for item in value]
+    if isinstance(value, dict):
+        return {str(k): sanitize_log_value(v, max_len=max_len) for k, v in value.items()}
+    return value
 
 
 
@@ -1086,7 +1400,8 @@ def apply_transform(value: Any, transform: str | None, spec: dict[str, Any] | No
 
 
 
-def resolve_context_value(bucket: AggregateBucket, alias: str, spec: Any) -> Any:
+def resolve_context_value(bucket: AggregateBucket, alias: str, spec: Any, context: dict[str, Any] | None = None) -> Any:
+    context = context or {}
     if isinstance(spec, str):
         value = get_bucket_field_value(bucket, spec)
         return value if value not in {None, ""} else None
@@ -1094,6 +1409,7 @@ def resolve_context_value(bucket: AggregateBucket, alias: str, spec: Any) -> Any
     if not isinstance(spec, dict):
         return spec
 
+    source = str(spec.get("source") or "").strip().lower()
     value: Any = None
     if "value" in spec:
         value = spec.get("value")
@@ -1105,24 +1421,39 @@ def resolve_context_value(bucket: AggregateBucket, alias: str, spec: Any) -> Any
             values = [get_bucket_field_value(bucket, str(item)) for item in fields]
             sep = str(spec.get("separator", ""))
             value = sep.join(str(item) for item in values if item not in {None, ""})
-    elif spec.get("source") == "time":
+    elif source == "template":
+        value = render_template_text(spec.get("template"), context)
+    elif source == "time":
         value = get_bucket_display_time(bucket, str(spec.get("mode") or bucket.phase))
-    elif spec.get("source") == "phase":
+    elif source == "phase":
         value = bucket.phase
-    elif spec.get("source") == "event_types":
+    elif source == "event_types":
         value = sorted(bucket.events.keys())
-    elif spec.get("source") == "group_name":
+    elif source == "group_name":
         value = bucket.group_name
-    elif spec.get("source") == "request_count":
+    elif source == "request_count":
         value = len(bucket.request_ids)
-    elif spec.get("source") == "event_count":
+    elif source == "event_count":
         value = len(bucket.events)
-    elif spec.get("source") == "request_ids":
+    elif source == "request_ids":
         value = list(bucket.request_ids)
-    elif spec.get("source") == "xml_live_stats":
+    elif source == "xml_live_stats":
         stats = get_xml_live_stats(bucket, spec)
         stats_key = str(spec.get("key") or alias)
         value = stats.get(stats_key)
+    elif source == "local_file_base64":
+        path_value = render_template_text(spec.get("path") or spec.get("file") or spec.get("template"), context)
+        if path_value:
+            value = file_to_base64_uri(path_value)
+    elif source == "room_cover_base64":
+        room_id_value = context.get("room_id")
+        if room_id_value in {None, ""}:
+            room_id_field = str(spec.get("room_id_field") or "EventData.RoomId")
+            room_id_value = get_bucket_field_value(bucket, room_id_field)
+        index_path = render_template_text(spec.get("index_path") or "/opt/WebhookToNapcat/cover/index.json", context) or "/opt/WebhookToNapcat/cover/index.json"
+        cover_path = resolve_room_cover_path(room_id_value, index_path=index_path)
+        if cover_path:
+            value = file_to_base64_uri(cover_path)
 
     transform = spec.get("transform") if isinstance(spec.get("transform"), str) else None
     value = apply_transform(value, transform, spec)
@@ -1177,13 +1508,13 @@ def build_aggregate_context(bucket: AggregateBucket) -> dict[str, Any]:
     context_spec = bucket.group_config.get("context")
     if isinstance(context_spec, dict):
         for alias, spec in context_spec.items():
-            ctx[str(alias)] = resolve_context_value(bucket, alias=str(alias), spec=spec)
+            ctx[str(alias)] = resolve_context_value(bucket, alias=str(alias), spec=spec, context=ctx)
 
     return ctx
 
 
 
-def render_output_spec(output: dict[str, Any], context: dict[str, Any]) -> str | None:
+def render_output_spec(output: dict[str, Any], context: dict[str, Any]) -> dict[str, Any] | None:
     return render_rule_output({"output": output}, context)
 
 
@@ -1242,7 +1573,7 @@ def get_output_targets_spec(rule: dict[str, Any], output: dict[str, Any] | None 
 
 
 
-def select_aggregate_output(bucket: AggregateBucket, context: dict[str, Any]) -> tuple[str | None, list[str], Any]:
+def select_aggregate_output(bucket: AggregateBucket, context: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str], Any]:
     group = bucket.group_config
     outputs = group.get("outputs")
     event_types = set(bucket.events.keys())
@@ -1321,9 +1652,9 @@ def get_aggregate_group(cfg: Config, handler: BaseHTTPRequestHandler, payload: d
 
 
 
-def build_aggregate_message(bucket: AggregateBucket) -> tuple[str | None, dict[str, Any]]:
+def build_aggregate_message(bucket: AggregateBucket) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     context = build_aggregate_context(bucket)
-    text, suppressed, targets_spec = select_aggregate_output(bucket, context)
+    message, suppressed, targets_spec = select_aggregate_output(bucket, context)
     meta: dict[str, Any] = {
         "enabled": True,
         "group_name": bucket.group_name,
@@ -1331,10 +1662,10 @@ def build_aggregate_message(bucket: AggregateBucket) -> tuple[str | None, dict[s
         "phase": bucket.phase,
         "event_types": sorted(bucket.events.keys()),
         "suppressed": suppressed,
-        "context": context,
+        "context": sanitize_log_value(context),
         "targets_spec": targets_spec,
     }
-    return text, meta
+    return message, meta
 
 
 
@@ -1508,12 +1839,12 @@ def is_trivial_trailing_end_bucket(bucket: AggregateBucket) -> bool:
 
 
 def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info: dict[str, Any] | None = None) -> None:
-    text, aggregate_meta = build_aggregate_message(bucket)
+    message, aggregate_meta = build_aggregate_message(bucket)
     message_record = build_aggregate_message_record(bucket, aggregate_meta)
     targets = resolve_target_specs(cfg, aggregate_meta.get("targets_spec"), context=aggregate_meta.get("context") if isinstance(aggregate_meta.get("context"), dict) else None)
     message_record["target"] = targets
 
-    if not text:
+    if not message:
         message_record["outcome"] = "suppressed"
         if debounce_info:
             message_record["debounce"] = debounce_info
@@ -1521,12 +1852,17 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info
         eprint(json.dumps({"event": "aggregate_suppressed", "request_ids": bucket.request_ids, "group_key": bucket.key}, ensure_ascii=False))
         return
 
-    message_record["forward_text"] = text
+    preview_text = get_rendered_message_preview(message) or "(rich media message)"
+    message_record["forward_text"] = preview_text
+    message_record["message_mode"] = message.get("mode")
     if debounce_info:
         message_record["debounce"] = debounce_info
 
     try:
-        results, chunks, resolved_targets = send_text_to_napcat(cfg, text, targets=targets)
+        send_info = send_rendered_message_to_napcat(cfg, message, targets=targets)
+        results = send_info.get("results") or []
+        chunks = send_info.get("chunks") or []
+        resolved_targets = send_info.get("resolved_targets") or []
         message_record["outcome"] = "forwarded"
         message_record["chunks"] = chunks
         message_record["chunks_count"] = len(chunks)
@@ -1534,6 +1870,9 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info
         message_record["delivery_count"] = len(results)
         message_record["target"] = resolved_targets
         message_record["napcat"] = results
+        message_record["used_fallback"] = bool(send_info.get("used_fallback"))
+        if send_info.get("fallback_reason"):
+            message_record["fallback_reason"] = send_info.get("fallback_reason")
         append_message_log(cfg, message_record)
         eprint(
             json.dumps(
@@ -1546,6 +1885,8 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info
                     "chunks": len(chunks),
                     "targets": len(resolved_targets),
                     "deliveries": len(results),
+                    "message_mode": send_info.get("mode"),
+                    "used_fallback": bool(send_info.get("used_fallback")),
                     "request_ids": bucket.request_ids,
                 },
                 ensure_ascii=False,
@@ -1604,10 +1945,11 @@ def flush_pending_end_notification(cfg: Config, notify_key: str) -> None:
 
 
 def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
-    text, aggregate_meta = build_aggregate_message(bucket)
+    message, aggregate_meta = build_aggregate_message(bucket)
     message_record = build_aggregate_message_record(bucket, aggregate_meta)
+    preview_text = get_rendered_message_preview(message) or "(rich media message)"
 
-    if not text:
+    if not message:
         message_record["outcome"] = "suppressed"
         append_message_log(cfg, message_record)
         eprint(json.dumps({"event": "aggregate_suppressed", "request_ids": bucket.request_ids, "group_key": bucket.key}, ensure_ascii=False))
@@ -1632,7 +1974,7 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
         with PENDING_END_LOCK:
             pending = PENDING_END_NOTIFICATIONS.get(notify_key)
         if pending and pending.expires_at > time.time():
-            message_record["forward_text"] = text
+            message_record["forward_text"] = preview_text
             message_record["outcome"] = "suppressed"
             message_record["debounce"] = {
                 "mode": "pending_end_window",
@@ -1702,7 +2044,7 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
         candidate_score = build_end_bucket_score(candidate_bucket)
 
         if previous_bucket is not None and pending.stream_end_bucket is not None and is_trivial_trailing_end_bucket(candidate_bucket) and candidate_score <= previous_score:
-            message_record["forward_text"] = text
+            message_record["forward_text"] = preview_text
             message_record["outcome"] = "suppressed"
             message_record["debounce"] = {
                 "mode": "pending_end_window",
@@ -1731,7 +2073,7 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
             pending.bucket = candidate_bucket
             status = "held_pending_end_candidate" if previous_bucket is None else "replaced_pending_end_candidate"
         else:
-            message_record["forward_text"] = text
+            message_record["forward_text"] = preview_text
             message_record["outcome"] = "suppressed"
             message_record["debounce"] = {
                 "mode": "pending_end_window",
@@ -1760,7 +2102,7 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
     else:
         status = "held_pending_end"
 
-    message_record["forward_text"] = text
+    message_record["forward_text"] = preview_text
     message_record["outcome"] = "held"
     message_record["debounce"] = {
         "mode": "pending_end_window",
@@ -1962,7 +2304,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "queued": True, "aggregate": aggregate_meta, "request_id": request_id})
                 return
 
-        text, targets = build_forward_text(self.cfg, self, payload)
+        message, targets = build_forward_message(self.cfg, self, payload)
+        preview_text = get_rendered_message_preview(message) or "(rich media message)"
         message_record: dict[str, Any] = {
             "ts": now_iso(),
             "request_id": request_id,
@@ -1975,12 +2318,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
             },
             "auth": auth,
             "payload_summary": request_record["request"]["payload_summary"],
-            "forward_text": text,
+            "forward_text": preview_text,
+            "message_mode": message.get("mode"),
             "target": targets,
         }
 
         try:
-            results, chunks, resolved_targets = send_text_to_napcat(self.cfg, text, targets=targets)
+            send_info = send_rendered_message_to_napcat(self.cfg, message, targets=targets)
+            results = send_info.get("results") or []
+            chunks = send_info.get("chunks") or []
+            resolved_targets = send_info.get("resolved_targets") or []
             message_record["outcome"] = "forwarded"
             message_record["chunks"] = chunks
             message_record["chunks_count"] = len(chunks)
@@ -1988,6 +2335,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
             message_record["delivery_count"] = len(results)
             message_record["target"] = resolved_targets
             message_record["napcat"] = results
+            message_record["used_fallback"] = bool(send_info.get("used_fallback"))
+            if send_info.get("fallback_reason"):
+                message_record["fallback_reason"] = send_info.get("fallback_reason")
             append_message_log(self.cfg, message_record)
             eprint(
                 json.dumps(
@@ -1997,6 +2347,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         "chunks": len(chunks),
                         "targets": len(resolved_targets),
                         "deliveries": len(results),
+                        "message_mode": send_info.get("mode"),
+                        "used_fallback": bool(send_info.get("used_fallback")),
                         "remote_ip": self.client_address[0],
                         "request_id": request_id,
                     },
