@@ -25,6 +25,7 @@ AGGREGATE_LOCK = threading.Lock()
 AGGREGATE_BUCKETS: dict[str, "AggregateBucket"] = {}
 PENDING_END_LOCK = threading.Lock()
 PENDING_END_NOTIFICATIONS: dict[str, "PendingEndNotification"] = {}
+RECENT_FINAL_END_UNTIL: dict[str, float] = {}
 PRICE_TABLE_CACHE: dict[str, dict[str, float]] = {}
 
 
@@ -1362,6 +1363,12 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info
 
 
 
+def mark_recent_final_end(notify_key: str, window_ms: int) -> None:
+    with PENDING_END_LOCK:
+        RECENT_FINAL_END_UNTIL[notify_key] = time.time() + max(0, window_ms) / 1000
+
+
+
 def flush_pending_end_notification(cfg: Config, notify_key: str) -> None:
     with PENDING_END_LOCK:
         pending = PENDING_END_NOTIFICATIONS.pop(notify_key, None)
@@ -1403,6 +1410,9 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
     now_ts = time.time()
     with PENDING_END_LOCK:
         expired_keys = [key for key, pending in PENDING_END_NOTIFICATIONS.items() if pending.expires_at <= now_ts]
+        expired_final_keys = [key for key, expiry in RECENT_FINAL_END_UNTIL.items() if expiry <= now_ts]
+        for expired_final_key in expired_final_keys:
+            RECENT_FINAL_END_UNTIL.pop(expired_final_key, None)
     for expired_key in expired_keys:
         flush_pending_end_notification(cfg, expired_key)
 
@@ -1448,6 +1458,7 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
     if "StreamEnded" in event_types:
         with PENDING_END_LOCK:
             pending = PENDING_END_NOTIFICATIONS.pop(notify_key, None)
+        mark_recent_final_end(notify_key, window_ms)
         if pending is not None:
             if pending.timer is not None:
                 pending.timer.cancel()
@@ -1488,6 +1499,7 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
 
     with PENDING_END_LOCK:
         pending = PENDING_END_NOTIFICATIONS.get(notify_key)
+        final_end_until = RECENT_FINAL_END_UNTIL.get(notify_key)
         if pending and pending.expires_at > time.time():
             message_record["forward_text"] = text
             message_record["outcome"] = "suppressed"
@@ -1502,6 +1514,29 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
                 json.dumps(
                     {
                         "event": "aggregate_pending_end_duplicate_suppressed",
+                        "group_key": bucket.key,
+                        "group_name": bucket.group_name,
+                        "request_ids": bucket.request_ids,
+                        "debounce": message_record["debounce"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return True
+        if final_end_until and final_end_until > time.time():
+            message_record["forward_text"] = text
+            message_record["outcome"] = "suppressed"
+            message_record["debounce"] = {
+                "mode": "pending_end_window",
+                "status": "suppressed_after_final_stream_end",
+                "key": notify_key,
+                "remaining_ms": int((final_end_until - time.time()) * 1000),
+            }
+            append_message_log(cfg, message_record)
+            eprint(
+                json.dumps(
+                    {
+                        "event": "aggregate_post_final_end_suppressed",
                         "group_key": bucket.key,
                         "group_name": bucket.group_name,
                         "request_ids": bucket.request_ids,
