@@ -2130,6 +2130,19 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
 
 
 
+def should_replace_aggregate_bucket_event(bucket: AggregateBucket, event_type: str, existing_payload: dict[str, Any], new_payload: dict[str, Any]) -> bool:
+    if bucket.group_name == "bililive_end" and event_type == "FileClosed":
+        existing_duration = safe_float(get_field_value(existing_payload, "EventData.Duration")) or 0.0
+        new_duration = safe_float(get_field_value(new_payload, "EventData.Duration")) or 0.0
+        existing_size = safe_int(get_field_value(existing_payload, "EventData.FileSize")) or -1
+        new_size = safe_int(get_field_value(new_payload, "EventData.FileSize")) or -1
+        existing_score = (int(round(existing_duration)), existing_size)
+        new_score = (int(round(new_duration)), new_size)
+        return new_score >= existing_score
+    return True
+
+
+
 def flush_aggregate_bucket(cfg: Config, key: str) -> None:
     with AGGREGATE_LOCK:
         bucket = AGGREGATE_BUCKETS.pop(key, None)
@@ -2168,11 +2181,18 @@ def queue_aggregate_event(cfg: Config, handler: BaseHTTPRequestHandler, parsed: 
         if request_id not in bucket.request_ids:
             bucket.request_ids.append(request_id)
         event_type = str(payload.get("EventType") or request_id)
-        bucket.events[event_type] = {
-            "request_id": request_id,
-            "payload": payload,
-            "ts": request_record["ts"],
-        }
+        existing_event = bucket.events.get(event_type)
+        should_replace_event = True
+        if isinstance(existing_event, dict):
+            existing_payload = existing_event.get("payload")
+            if isinstance(existing_payload, dict):
+                should_replace_event = should_replace_aggregate_bucket_event(bucket, event_type, existing_payload, payload)
+        if should_replace_event:
+            bucket.events[event_type] = {
+                "request_id": request_id,
+                "payload": payload,
+                "ts": request_record["ts"],
+            }
         bucket.payload_summaries.append(request_record["request"]["payload_summary"])
         bucket.request_path = parsed.path
         bucket.remote_ip = remote_ip
