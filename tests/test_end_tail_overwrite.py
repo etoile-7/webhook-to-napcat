@@ -5,6 +5,7 @@ from webhook_to_napcat.server import (
     build_end_bucket_metrics,
     get_bucket_field_value,
     should_replace_aggregate_bucket_event,
+    should_suppress_recent_forwarded_end_candidate,
 )
 
 
@@ -102,6 +103,82 @@ class EndTailOverwriteTest(unittest.TestCase):
         self.assertTrue(
             should_replace_aggregate_bucket_event(bucket, "FileClosed", weak_existing, strong_new)
         )
+
+    def test_recent_forwarded_end_suppresses_late_tiny_end_only_tail(self) -> None:
+        bucket = self.make_bucket()
+        bucket.events["FileClosed"] = {
+            "request_id": "tiny-fc",
+            "ts": "t1",
+            "payload": {
+                "EventType": "FileClosed",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【鸣潮/突击】来玩团子活动！",
+                    "RelativePath": "rec/tiny-tail.flv",
+                    "FileSize": 1081563,
+                    "Duration": 0.742,
+                    "Streaming": True,
+                    "Recording": False,
+                },
+            },
+        }
+        bucket.events["SessionEnded"] = {
+            "request_id": "tiny-se",
+            "ts": "t2",
+            "payload": {
+                "EventType": "SessionEnded",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【鸣潮/突击】来玩团子活动！",
+                    "SessionId": "tiny-session",
+                    "Streaming": True,
+                    "Recording": False,
+                },
+            },
+        }
+
+        recent_score = (1, 1, 1728, 4366, 402630, 1325, 1476158361)
+        self.assertTrue(should_suppress_recent_forwarded_end_candidate(recent_score, bucket))
+
+    def test_recent_forwarded_end_does_not_suppress_meaningful_followup_end(self) -> None:
+        bucket = self.make_bucket()
+        bucket.events["FileClosed"] = {
+            "request_id": "followup-fc",
+            "ts": "t1",
+            "payload": {
+                "EventType": "FileClosed",
+                "EventData": {
+                    "RoomId": 30858592,
+                    "Name": "思诺snow",
+                    "Title": "【3D】思诺的100问八",
+                    "RelativePath": "rec/followup.flv",
+                    "FileSize": 47897408,
+                    "Duration": 182.643,
+                    "Streaming": True,
+                    "Recording": False,
+                },
+            },
+        }
+        bucket.events["SessionEnded"] = {
+            "request_id": "followup-se",
+            "ts": "t2",
+            "payload": {
+                "EventType": "SessionEnded",
+                "EventData": {
+                    "RoomId": 30858592,
+                    "Name": "思诺snow",
+                    "Title": "【3D】思诺的100问八",
+                    "SessionId": "followup-session",
+                    "Streaming": True,
+                    "Recording": False,
+                },
+            },
+        }
+
+        recent_score = (1, 1, 1141, 5510, 226740, 2398, 2075784198)
+        self.assertFalse(should_suppress_recent_forwarded_end_candidate(recent_score, bucket))
 
 
 if __name__ == "__main__":

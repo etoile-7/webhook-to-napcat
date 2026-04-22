@@ -27,6 +27,8 @@ AGGREGATE_LOCK = threading.Lock()
 AGGREGATE_BUCKETS: dict[str, "AggregateBucket"] = {}
 PENDING_END_LOCK = threading.Lock()
 PENDING_END_NOTIFICATIONS: dict[str, "PendingEndNotification"] = {}
+RECENT_END_LOCK = threading.Lock()
+RECENT_FORWARDED_ENDS: dict[str, "RecentForwardedEnd"] = {}
 PRICE_TABLE_CACHE: dict[str, dict[str, float]] = {}
 BILIBILI_ROOM_INFO_CACHE: dict[str, dict[str, Any]] = {}
 
@@ -79,6 +81,13 @@ class PendingEndNotification:
     expires_at: float
     timer: threading.Timer | None = None
     stream_end_bucket: AggregateBucket | None = None
+
+
+@dataclass
+class RecentForwardedEnd:
+    key: str
+    score: tuple[int, int, int, int, int, int, int]
+    expires_at: float
 
 
 def eprint(*args: Any) -> None:
@@ -1838,6 +1847,87 @@ def is_trivial_trailing_end_bucket(bucket: AggregateBucket) -> bool:
 
 
 
+def get_recent_end_suppress_window_ms(cfg: Config) -> int:
+    base_window = max(0, int(cfg.notify_debounce_ms or 0))
+    return max(120_000, base_window * 8)
+
+
+
+def get_recent_forwarded_end(notify_key: str) -> RecentForwardedEnd | None:
+    now_ts = time.time()
+    with RECENT_END_LOCK:
+        recent = RECENT_FORWARDED_ENDS.get(notify_key)
+        if recent is None:
+            return None
+        if recent.expires_at <= now_ts:
+            RECENT_FORWARDED_ENDS.pop(notify_key, None)
+            return None
+        return recent
+
+
+
+def remember_recent_forwarded_end(cfg: Config, notify_key: str, bucket: AggregateBucket) -> None:
+    if not notify_key:
+        return
+
+    recent = RecentForwardedEnd(
+        key=notify_key,
+        score=build_end_bucket_score(bucket),
+        expires_at=time.time() + get_recent_end_suppress_window_ms(cfg) / 1000,
+    )
+    with RECENT_END_LOCK:
+        RECENT_FORWARDED_ENDS[notify_key] = recent
+
+
+
+def clear_recent_forwarded_end(notify_key: str) -> None:
+    if not notify_key:
+        return
+    with RECENT_END_LOCK:
+        RECENT_FORWARDED_ENDS.pop(notify_key, None)
+
+
+
+def is_recent_tail_candidate_bucket(bucket: AggregateBucket) -> bool:
+    if "StreamEnded" in bucket.events:
+        return False
+
+    metrics = build_end_bucket_metrics(bucket)
+    duration_seconds = safe_float(metrics.get("duration_seconds"))
+    file_size_bytes = safe_int(metrics.get("file_size_bytes"))
+    interaction_count = safe_int(metrics.get("interaction_count_value"))
+    bullet_count = safe_int(metrics.get("bullet_count_value"))
+    sc_total = safe_float(metrics.get("sc_total_value"))
+    total_revenue = safe_float(metrics.get("total_revenue_value"))
+
+    checks: list[bool] = []
+    if duration_seconds is not None:
+        checks.append(duration_seconds <= 30.0)
+    if file_size_bytes is not None:
+        checks.append(file_size_bytes <= 16 * 1024 * 1024)
+    if interaction_count is not None:
+        checks.append(interaction_count <= 100)
+    if bullet_count is not None:
+        checks.append(bullet_count <= 100)
+    if sc_total is not None:
+        checks.append(sc_total <= 0.0)
+    if total_revenue is not None:
+        checks.append(total_revenue <= 1.0)
+
+    return bool(checks) and all(checks)
+
+
+
+def should_suppress_recent_forwarded_end_candidate(
+    recent_score: tuple[int, int, int, int, int, int, int], candidate_bucket: AggregateBucket
+) -> bool:
+    candidate_score = build_end_bucket_score(candidate_bucket)
+    if candidate_score >= recent_score:
+        return False
+    return is_recent_tail_candidate_bucket(candidate_bucket)
+
+
+
 def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info: dict[str, Any] | None = None) -> None:
     message, aggregate_meta = build_aggregate_message(bucket)
     message_record = build_aggregate_message_record(bucket, aggregate_meta)
@@ -1874,6 +1964,8 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info
         if send_info.get("fallback_reason"):
             message_record["fallback_reason"] = send_info.get("fallback_reason")
         append_message_log(cfg, message_record)
+        if bucket.group_name == "bililive_end":
+            remember_recent_forwarded_end(cfg, build_bililive_notification_key(aggregate_meta), bucket)
         eprint(
             json.dumps(
                 {
@@ -1997,6 +2089,8 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
             )
             return True
 
+        if "StreamStarted" in event_types:
+            clear_recent_forwarded_end(notify_key)
         deliver_aggregate_bucket(
             cfg,
             bucket,
@@ -2008,6 +2102,41 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
             },
         )
         return True
+
+    with PENDING_END_LOCK:
+        existing_pending = PENDING_END_NOTIFICATIONS.get(notify_key)
+        if existing_pending is not None and existing_pending.expires_at <= time.time():
+            existing_pending = None
+
+    if existing_pending is None and is_end_candidate_bucket(bucket):
+        recent = get_recent_forwarded_end(notify_key)
+        if recent is not None and should_suppress_recent_forwarded_end_candidate(recent.score, bucket):
+            candidate_score = build_end_bucket_score(bucket)
+            message_record["forward_text"] = preview_text
+            message_record["outcome"] = "suppressed"
+            message_record["debounce"] = {
+                "mode": "pending_end_window",
+                "status": "suppressed_after_recent_forwarded_end",
+                "key": notify_key,
+                "recent_window_ms": get_recent_end_suppress_window_ms(cfg),
+                "candidate_score": list(candidate_score),
+                "kept_score": list(recent.score),
+                "remaining_ms": int((recent.expires_at - time.time()) * 1000),
+            }
+            append_message_log(cfg, message_record)
+            eprint(
+                json.dumps(
+                    {
+                        "event": "aggregate_recent_end_tail_suppressed",
+                        "group_key": bucket.key,
+                        "group_name": bucket.group_name,
+                        "request_ids": bucket.request_ids,
+                        "debounce": message_record["debounce"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return True
 
     created_pending = False
     with PENDING_END_LOCK:
