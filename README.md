@@ -308,6 +308,41 @@ image: ghcr.io/etoile-7/webhook-to-napcat:latest
 - `source: "local_file_base64"`：读取本地文件并编码成 `base64://...`
 - `source: "room_cover_base64"`：按 `room_id` 从封面索引里读取本地封面并编码成 `base64://...`
 
+如果模板里想直接用 `{sc_count}` / `{sc_total}` / `{captain_count}` 这类统计字段，需要先在 `aggregate.groups[*].context` 里显式映射。例如：
+
+```json
+{
+  "context": {
+    "sc_count": {
+      "source": "xml_live_stats",
+      "key": "sc_count",
+      "base_dir": "/data/zhijiang_video",
+      "relative_path_field": "EventData.RelativePath",
+      "gift_prices_markdown_path": "/app/bilibili_gift_prices.md",
+      "strip_prefixes": ["rec/"],
+      "default": "0"
+    },
+    "sc_total": {
+      "source": "xml_live_stats",
+      "key": "sc_total",
+      "base_dir": "/data/zhijiang_video",
+      "relative_path_field": "EventData.RelativePath",
+      "gift_prices_markdown_path": "/app/bilibili_gift_prices.md",
+      "strip_prefixes": ["rec/"]
+    },
+    "captain_count": {
+      "source": "xml_live_stats",
+      "key": "captain_count",
+      "base_dir": "/data/zhijiang_video",
+      "relative_path_field": "EventData.RelativePath",
+      "gift_prices_markdown_path": "/app/bilibili_gift_prices.md",
+      "strip_prefixes": ["rec/"],
+      "default": "0"
+    }
+  }
+}
+```
+
 静态直播间封面示例：
 
 ```json
@@ -362,6 +397,7 @@ python3 scripts/fetch_bilibili_room_covers.py \
 - `event_types`
 - `request_count`
 - `event_count`
+- 以及通过 `aggregate.context` 显式映射出来的扩展字段，例如：`sc_count`、`sc_total`、`captain_count`、`interaction_count_display`、`gift_unknown_line`、`total_revenue_label`、`total_revenue`
 
 聚合组里常用字段：
 
