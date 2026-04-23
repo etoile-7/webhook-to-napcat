@@ -283,6 +283,7 @@ image: ghcr.io/etoile-7/webhook-to-napcat:latest
 - `text` 段：发送文字
 - `image` 段：发送图片，`file` 支持 `http(s)://...`、`base64://...` 等 NapCat / OneBot 可识别地址
 - 如果 rich media 发送失败，可用 `fallback_template` 自动退回纯文本
+- 模板渲染遇到缺失字段时，会仅保留该占位符原样输出（如 `{missing_key}`），其余已存在字段仍会正常展开
 
 示例：开播时发送“文字 + 图片 + 文字”：
 

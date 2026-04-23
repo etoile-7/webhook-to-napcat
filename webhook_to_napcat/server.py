@@ -589,6 +589,25 @@ def rule_matches(rule: dict[str, Any], handler: BaseHTTPRequestHandler, payload:
     return True
 
 
+class PartialFormatDict(dict[str, Any]):
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+
+def partial_format_template(template: str, values: dict[str, Any] | None) -> str:
+    if not isinstance(values, dict):
+        return template
+    flattened = {
+        k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v)
+        for k, v in values.items()
+    }
+    try:
+        return template.format_map(PartialFormatDict(flattened))
+    except Exception:  # noqa: BLE001
+        return template
+
+
 
 def render_template_text(template: Any, payload: Any) -> str | None:
     if template is None:
@@ -601,11 +620,7 @@ def render_template_text(template: Any, payload: Any) -> str | None:
     if not template:
         return None
     if isinstance(payload, dict):
-        flat = {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v) for k, v in payload.items()}
-        try:
-            return raw_template.format(**flat).strip()
-        except Exception:  # noqa: BLE001
-            return template
+        return partial_format_template(raw_template, payload).strip()
     return template
 
 
