@@ -1963,6 +1963,23 @@ def should_suppress_recent_forwarded_start_candidate(
 
 
 
+def is_true_bililive_start_bucket(bucket: AggregateBucket) -> bool:
+    if bucket.group_name != "bililive_start":
+        return False
+    return "StreamStarted" in bucket.events
+
+
+
+def is_recording_segment_start_bucket(bucket: AggregateBucket) -> bool:
+    if bucket.group_name != "bililive_start":
+        return False
+    event_types = set(bucket.events.keys())
+    if "StreamStarted" in event_types:
+        return False
+    return bool(event_types & {"SessionStarted", "FileOpening"})
+
+
+
 def get_recent_end_suppress_window_ms(cfg: Config) -> int:
     base_window = max(0, int(cfg.notify_debounce_ms or 0))
     return max(120_000, base_window * 8)
@@ -2294,8 +2311,31 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
             )
             return True
 
-        if "StreamStarted" in event_types:
-            clear_recent_forwarded_end(notify_key)
+        if not is_true_bililive_start_bucket(bucket):
+            message_record["forward_text"] = preview_text
+            message_record["outcome"] = "suppressed"
+            message_record["debounce"] = {
+                "mode": "true_start_filter",
+                "status": "suppressed_recording_segment_start_without_streamstarted",
+                "key": notify_key,
+                "event_types": sorted(event_types),
+            }
+            append_message_log(cfg, message_record)
+            eprint(
+                json.dumps(
+                    {
+                        "event": "aggregate_recording_segment_start_suppressed",
+                        "group_key": bucket.key,
+                        "group_name": bucket.group_name,
+                        "request_ids": bucket.request_ids,
+                        "debounce": message_record["debounce"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return True
+
+        clear_recent_forwarded_end(notify_key)
         deliver_aggregate_bucket(
             cfg,
             bucket,

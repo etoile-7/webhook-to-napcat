@@ -6,7 +6,9 @@ from webhook_to_napcat.server import (
     build_start_bucket_score,
     get_bucket_field_value,
     is_recording_segment_end_bucket,
+    is_recording_segment_start_bucket,
     is_true_bililive_end_bucket,
+    is_true_bililive_start_bucket,
     should_replace_aggregate_bucket_event,
     should_suppress_recent_forwarded_end_candidate,
     should_suppress_recent_forwarded_start_candidate,
@@ -216,6 +218,46 @@ class EndTailOverwriteTest(unittest.TestCase):
         recent_score = (1, 1, 0, 2)
         self.assertEqual(build_start_bucket_score(bucket), (0, 0, 1, 1))
         self.assertTrue(should_suppress_recent_forwarded_start_candidate(recent_score, bucket))
+
+    def test_sessionstarted_without_streamstarted_is_recording_segment_start(self) -> None:
+        bucket = self.make_start_bucket()
+        bucket.events["SessionStarted"] = {
+            "request_id": "session-started",
+            "ts": "t1",
+            "payload": {
+                "EventType": "SessionStarted",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "Streaming": True,
+                    "Recording": True,
+                },
+            },
+        }
+
+        self.assertTrue(is_recording_segment_start_bucket(bucket))
+        self.assertFalse(is_true_bililive_start_bucket(bucket))
+
+    def test_streamstarted_is_true_start(self) -> None:
+        bucket = self.make_start_bucket()
+        bucket.events["StreamStarted"] = {
+            "request_id": "stream-started",
+            "ts": "t1",
+            "payload": {
+                "EventType": "StreamStarted",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "Streaming": True,
+                    "Recording": True,
+                },
+            },
+        }
+
+        self.assertFalse(is_recording_segment_start_bucket(bucket))
+        self.assertTrue(is_true_bililive_start_bucket(bucket))
 
     def test_recording_segment_end_while_streaming_is_not_true_stream_end(self) -> None:
         bucket = self.make_bucket()
