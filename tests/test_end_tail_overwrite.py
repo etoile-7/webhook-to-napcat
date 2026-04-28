@@ -5,6 +5,8 @@ from webhook_to_napcat.server import (
     build_end_bucket_metrics,
     build_start_bucket_score,
     get_bucket_field_value,
+    is_recording_segment_end_bucket,
+    is_true_bililive_end_bucket,
     should_replace_aggregate_bucket_event,
     should_suppress_recent_forwarded_end_candidate,
     should_suppress_recent_forwarded_start_candidate,
@@ -215,7 +217,79 @@ class EndTailOverwriteTest(unittest.TestCase):
         self.assertEqual(build_start_bucket_score(bucket), (0, 0, 1, 1))
         self.assertTrue(should_suppress_recent_forwarded_start_candidate(recent_score, bucket))
 
-    def test_recent_forwarded_start_keeps_stronger_streamstarted_followup(self) -> None:
+    def test_recording_segment_end_while_streaming_is_not_true_stream_end(self) -> None:
+        bucket = self.make_bucket()
+        bucket.events["FileClosed"] = {
+            "request_id": "segment-fc",
+            "ts": "t1",
+            "payload": {
+                "EventType": "FileClosed",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "RelativePath": "rec/segment.flv",
+                    "FileSize": 5417829380,
+                    "Duration": 4847.777,
+                    "Streaming": True,
+                    "Recording": True,
+                },
+            },
+        }
+        bucket.events["SessionEnded"] = {
+            "request_id": "segment-se",
+            "ts": "t2",
+            "payload": {
+                "EventType": "SessionEnded",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "SessionId": "old-session",
+                    "Streaming": True,
+                    "Recording": False,
+                },
+            },
+        }
+
+        self.assertTrue(is_recording_segment_end_bucket(bucket))
+        self.assertFalse(is_true_bililive_end_bucket(bucket))
+
+    def test_streamended_is_true_end_even_if_stats_payload_streaming_true(self) -> None:
+        bucket = self.make_bucket()
+        bucket.events["FileClosed"] = {
+            "request_id": "fc",
+            "ts": "t1",
+            "payload": {
+                "EventType": "FileClosed",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "FileSize": 5417829380,
+                    "Duration": 4847.777,
+                    "Streaming": True,
+                },
+            },
+        }
+        bucket.events["StreamEnded"] = {
+            "request_id": "stream-ended",
+            "ts": "t2",
+            "payload": {
+                "EventType": "StreamEnded",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "Streaming": False,
+                },
+            },
+        }
+
+        self.assertFalse(is_recording_segment_end_bucket(bucket))
+        self.assertTrue(is_true_bililive_end_bucket(bucket))
+
+    def test_recent_forwarded_start_suppresses_stronger_streamstarted_followup(self) -> None:
         bucket = self.make_start_bucket()
         bucket.request_ids.extend(["stream-1"])
         bucket.events["StreamStarted"] = {
@@ -233,7 +307,7 @@ class EndTailOverwriteTest(unittest.TestCase):
 
         recent_score = (0, 1, 0, 1)
         self.assertEqual(build_start_bucket_score(bucket), (1, 0, 0, 1))
-        self.assertFalse(should_suppress_recent_forwarded_start_candidate(recent_score, bucket))
+        self.assertTrue(should_suppress_recent_forwarded_start_candidate(recent_score, bucket))
 
 
 if __name__ == "__main__":

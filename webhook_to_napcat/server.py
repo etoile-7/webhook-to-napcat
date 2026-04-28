@@ -1901,7 +1901,16 @@ def build_start_bucket_score(bucket: AggregateBucket) -> tuple[int, int, int, in
 def get_recent_start_suppress_window_ms(cfg: Config, bucket: AggregateBucket) -> int:
     group_window_ms = int(bucket.group_config.get("window_ms", cfg.aggregate_window_ms) or cfg.aggregate_window_ms)
     base_window = max(0, int(cfg.notify_debounce_ms or 0))
-    return max(15_000, base_window, max(0, group_window_ms))
+    configured_window = safe_int(bucket.group_config.get("recent_start_suppress_ms"))
+    if configured_window is not None:
+        return max(0, configured_window)
+
+    # A bililive start notification is a live-session level signal, not a recording-file
+    # signal.  BililiveRecorder may later emit SessionStarted/FileOpening again when it
+    # splits/reopens the recording while the stream is still live.  Keep the already
+    # forwarded start active long enough to suppress those follow-up starts; a real end
+    # notification clears it earlier.
+    return max(12 * 60 * 60 * 1000, base_window, max(0, group_window_ms))
 
 
 
@@ -1943,8 +1952,14 @@ def clear_recent_forwarded_start(notify_key: str) -> None:
 def should_suppress_recent_forwarded_start_candidate(
     recent_score: tuple[int, int, int, int], candidate_bucket: AggregateBucket
 ) -> bool:
-    candidate_score = build_start_bucket_score(candidate_bucket)
-    return candidate_score <= recent_score
+    # Once a start notification for the same room/name/title has been forwarded, every
+    # later start-shaped event with the same notify key is a duplicate until a genuine
+    # stream end clears the remembered start.  This intentionally suppresses even a
+    # stronger later candidate (for example StreamStarted after SessionStarted), because
+    # the user-visible "开播" notification has already been sent.
+    _ = recent_score
+    _ = candidate_bucket
+    return True
 
 
 
@@ -1986,6 +2001,60 @@ def clear_recent_forwarded_end(notify_key: str) -> None:
         return
     with RECENT_END_LOCK:
         RECENT_FORWARDED_ENDS.pop(notify_key, None)
+
+
+
+def is_true_bililive_end_bucket(bucket: AggregateBucket) -> bool:
+    if bucket.group_name != "bililive_end":
+        return False
+
+    event_types = set(bucket.events.keys())
+    if "StreamEnded" in event_types:
+        return True
+
+    metrics = build_end_bucket_metrics(bucket)
+    # Only an explicit Streaming=true means this is a recording/session rollover while
+    # the live stream is still active. Missing/unknown Streaming keeps legacy behavior.
+    return metrics.get("streaming") is not True
+
+
+
+def is_recording_segment_end_bucket(bucket: AggregateBucket) -> bool:
+    if bucket.group_name != "bililive_end":
+        return False
+    if "StreamEnded" in bucket.events:
+        return False
+    if not is_end_candidate_bucket(bucket):
+        return False
+    metrics = build_end_bucket_metrics(bucket)
+    return metrics.get("streaming") is True
+
+
+
+def suppress_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info: dict[str, Any] | None = None) -> None:
+    message, aggregate_meta = build_aggregate_message(bucket)
+    message_record = build_aggregate_message_record(bucket, aggregate_meta)
+    if message:
+        message_record["forward_text"] = get_rendered_message_preview(message) or "(rich media message)"
+        message_record["message_mode"] = message.get("mode")
+    message_record["outcome"] = "suppressed"
+    if debounce_info:
+        message_record["debounce"] = debounce_info
+    append_message_log(cfg, message_record)
+    eprint(
+        json.dumps(
+            {
+                "event": "aggregate_suppressed",
+                "group_key": bucket.key,
+                "group_name": bucket.group_name,
+                "phase": bucket.phase,
+                "event_types": aggregate_meta.get("event_types"),
+                "request_ids": bucket.request_ids,
+                "debounce": debounce_info,
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 
@@ -2069,7 +2138,8 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info
         if bucket.group_name == "bililive_start":
             remember_recent_forwarded_start(cfg, notify_key, bucket)
         elif bucket.group_name == "bililive_end":
-            clear_recent_forwarded_start(notify_key)
+            if is_true_bililive_end_bucket(bucket):
+                clear_recent_forwarded_start(notify_key)
             remember_recent_forwarded_end(cfg, notify_key, bucket)
         eprint(
             json.dumps(
@@ -2128,16 +2198,18 @@ def flush_pending_end_notification(cfg: Config, notify_key: str) -> None:
     if bucket is None:
         return
 
-    deliver_aggregate_bucket(
-        cfg,
-        bucket,
-        debounce_info={
-            "mode": "pending_end_window",
-            "status": "expired_forwarded_after_stream_end" if pending.stream_end_bucket is not None else "expired_forwarded",
-            "key": notify_key,
-            "window_ms": max(0, int(cfg.notify_debounce_ms or 0)),
-        },
-    )
+    debounce_info = {
+        "mode": "pending_end_window",
+        "status": "expired_forwarded_after_stream_end" if pending.stream_end_bucket is not None else "expired_forwarded",
+        "key": notify_key,
+        "window_ms": max(0, int(cfg.notify_debounce_ms or 0)),
+    }
+    if is_recording_segment_end_bucket(bucket):
+        debounce_info["status"] = "suppressed_recording_segment_end_while_streaming"
+        suppress_aggregate_bucket(cfg, bucket, debounce_info=debounce_info)
+        return
+
+    deliver_aggregate_bucket(cfg, bucket, debounce_info=debounce_info)
 
 
 
