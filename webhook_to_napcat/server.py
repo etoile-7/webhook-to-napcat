@@ -1953,9 +1953,11 @@ def should_suppress_recent_forwarded_start_candidate(
     recent_score: tuple[int, int, int, int], candidate_bucket: AggregateBucket
 ) -> bool:
     # Once a start notification for the same room/name/title has been forwarded, every
-    # later start-shaped event with the same notify key is a duplicate until a genuine
-    # stream end clears the remembered start.  This intentionally suppresses even a
-    # stronger later candidate (for example StreamStarted after SessionStarted), because
+    # later start-shaped event with the same notify key is a duplicate only for the
+    # current live lifecycle. A true end notification clears the remembered start, so a
+    # reconnecting StreamStarted after 下播 has been forwarded is allowed through.
+    # This intentionally suppresses even a stronger later candidate (for example
+    # StreamStarted after SessionStarted) while the lifecycle is still active, because
     # the user-visible "开播" notification has already been sent.
     _ = recent_score
     _ = candidate_bucket

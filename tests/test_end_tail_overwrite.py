@@ -2,6 +2,7 @@ import unittest
 
 from webhook_to_napcat.server import (
     AggregateBucket,
+    Config,
     build_end_bucket_metrics,
     build_start_bucket_score,
     get_bucket_field_value,
@@ -9,6 +10,9 @@ from webhook_to_napcat.server import (
     is_recording_segment_start_bucket,
     is_true_bililive_end_bucket,
     is_true_bililive_start_bucket,
+    clear_recent_forwarded_start,
+    get_recent_forwarded_start,
+    remember_recent_forwarded_start,
     should_replace_aggregate_bucket_event,
     should_suppress_recent_forwarded_end_candidate,
     should_suppress_recent_forwarded_start_candidate,
@@ -27,6 +31,29 @@ class EndTailOverwriteTest(unittest.TestCase):
             remote_ip="127.0.0.1",
             auth={},
             target={"private": 1, "group": None},
+        )
+
+    def make_config(self) -> Config:
+        return Config(
+            listen_host="127.0.0.1",
+            listen_port=8787,
+            path="/webhook",
+            secret="",
+            napcat_base_url="http://127.0.0.1:3001",
+            napcat_token="",
+            napcat_token_mode="header",
+            private=1,
+            group=None,
+            timeout=1.0,
+            retries=0,
+            chunk_size=280,
+            title_prefix="",
+            include_headers=False,
+            rules_path="rules.json",
+            log_dir="",
+            aggregate_window_ms=3000,
+            notify_file_opening=False,
+            notify_debounce_ms=15000,
         )
 
     def make_start_bucket(self) -> AggregateBucket:
@@ -258,6 +285,35 @@ class EndTailOverwriteTest(unittest.TestCase):
 
         self.assertFalse(is_recording_segment_start_bucket(bucket))
         self.assertTrue(is_true_bililive_start_bucket(bucket))
+
+    def test_true_end_clears_start_dedupe_so_reconnect_start_is_allowed(self) -> None:
+        cfg = self.make_config()
+        notify_key = "bililive:22625027:乃琳Queen:【归环/突击】我也要死吗？"
+        bucket = self.make_start_bucket()
+        bucket.events["StreamStarted"] = {
+            "request_id": "stream-started",
+            "ts": "t1",
+            "payload": {
+                "EventType": "StreamStarted",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "Streaming": True,
+                    "Recording": True,
+                },
+            },
+        }
+
+        clear_recent_forwarded_start(notify_key)
+        remember_recent_forwarded_start(cfg, notify_key, bucket)
+        self.assertIsNotNone(get_recent_forwarded_start(notify_key))
+
+        # This is what a forwarded true StreamEnded/下播 notification does; after it,
+        # a reconnecting StreamStarted for the same room/name/title must not be hidden
+        # behind the previous lifecycle's dedupe state.
+        clear_recent_forwarded_start(notify_key)
+        self.assertIsNone(get_recent_forwarded_start(notify_key))
 
     def test_recording_segment_end_while_streaming_is_not_true_stream_end(self) -> None:
         bucket = self.make_bucket()
