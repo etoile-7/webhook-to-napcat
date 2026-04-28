@@ -85,6 +85,9 @@ class PendingEndNotification:
     expires_at: float
     timer: threading.Timer | None = None
     stream_end_bucket: AggregateBucket | None = None
+    created_at: float = field(default_factory=time.time)
+    window_ms: int = 0
+    streaming_end_extended: bool = False
 
 
 @dataclass
@@ -2184,6 +2187,94 @@ def is_recording_segment_end_bucket(bucket: AggregateBucket) -> bool:
 
 
 
+def is_meaningful_streaming_end_candidate(bucket: AggregateBucket) -> bool:
+    if not is_recording_segment_end_bucket(bucket):
+        return False
+
+    metrics = build_end_bucket_metrics(bucket)
+    duration_seconds = safe_float(metrics.get("duration_seconds"))
+    file_size_bytes = safe_int(metrics.get("file_size_bytes"))
+    interaction_count = safe_int(metrics.get("interaction_count_value"))
+    bullet_count = safe_int(metrics.get("bullet_count_value"))
+    sc_total = safe_float(metrics.get("sc_total_value"))
+    total_revenue = safe_float(metrics.get("total_revenue_value"))
+
+    return any(
+        [
+            duration_seconds is not None and duration_seconds >= 60.0,
+            file_size_bytes is not None and file_size_bytes >= 64 * 1024 * 1024,
+            interaction_count is not None and interaction_count >= 100,
+            bullet_count is not None and bullet_count >= 100,
+            sc_total is not None and sc_total > 0.0,
+            total_revenue is not None and total_revenue > 1.0,
+        ]
+    )
+
+
+
+def get_streaming_end_confirm_window_ms(cfg: Config, bucket: AggregateBucket | None = None) -> int:
+    configured_window = None
+    if bucket is not None:
+        configured_window = safe_int(bucket.group_config.get("streaming_end_confirm_ms"))
+    if configured_window is None:
+        configured_window = safe_int(os.getenv("WEBHOOK_STREAMING_END_CONFIRM_MS"))
+    if configured_window is not None:
+        return max(0, configured_window)
+    return 90_000
+
+
+
+def extend_pending_end_for_stream_end(cfg: Config, notify_key: str, pending: PendingEndNotification, bucket: AggregateBucket) -> bool:
+    confirm_window_ms = get_streaming_end_confirm_window_ms(cfg, bucket)
+    if confirm_window_ms <= 0 or pending.streaming_end_extended:
+        return False
+
+    elapsed_ms = int((time.time() - pending.created_at) * 1000)
+    remaining_ms = max(0, confirm_window_ms - elapsed_ms)
+    if remaining_ms <= 0:
+        return False
+
+    timer = threading.Timer(remaining_ms / 1000, flush_pending_end_notification, args=(cfg, notify_key))
+    timer.daemon = True
+    pending.expires_at = time.time() + remaining_ms / 1000
+    pending.timer = timer
+    pending.window_ms = confirm_window_ms
+    pending.streaming_end_extended = True
+
+    with PENDING_END_LOCK:
+        PENDING_END_NOTIFICATIONS[notify_key] = pending
+        timer.start()
+
+    message, aggregate_meta = build_aggregate_message(bucket)
+    message_record = build_aggregate_message_record(bucket, aggregate_meta)
+    if message:
+        message_record["forward_text"] = get_rendered_message_preview(message) or "(rich media message)"
+        message_record["message_mode"] = message.get("mode")
+    message_record["outcome"] = "held"
+    message_record["debounce"] = {
+        "mode": "pending_end_window",
+        "status": "extended_waiting_for_stream_end_after_streaming_candidate",
+        "key": notify_key,
+        "window_ms": confirm_window_ms,
+        "remaining_ms": remaining_ms,
+    }
+    append_message_log(cfg, message_record)
+    eprint(
+        json.dumps(
+            {
+                "event": "aggregate_pending_end_extended_for_stream_end",
+                "group_key": bucket.key,
+                "group_name": bucket.group_name,
+                "request_ids": bucket.request_ids,
+                "debounce": message_record["debounce"],
+            },
+            ensure_ascii=False,
+        )
+    )
+    return True
+
+
+
 def suppress_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info: dict[str, Any] | None = None) -> None:
     message, aggregate_meta = build_aggregate_message(bucket)
     message_record = build_aggregate_message_record(bucket, aggregate_meta)
@@ -2358,6 +2449,8 @@ def flush_pending_end_notification(cfg: Config, notify_key: str) -> None:
         "window_ms": max(0, int(cfg.notify_debounce_ms or 0)),
     }
     if is_recording_segment_end_bucket(bucket):
+        if is_meaningful_streaming_end_candidate(bucket) and extend_pending_end_for_stream_end(cfg, notify_key, pending, bucket):
+            return
         debounce_info["status"] = "suppressed_recording_segment_end_while_streaming"
         suppress_aggregate_bucket(cfg, bucket, debounce_info=debounce_info)
         return
@@ -2565,6 +2658,7 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
                 bucket=None,
                 expires_at=time.time() + window_ms / 1000,
                 timer=timer,
+                window_ms=window_ms,
             )
             PENDING_END_NOTIFICATIONS[notify_key] = pending
             timer.start()

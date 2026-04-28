@@ -8,8 +8,10 @@ from webhook_to_napcat.server import (
     cancel_pending_start_after_end,
     get_bucket_field_value,
     get_start_after_end_confirm_window_ms,
+    get_streaming_end_confirm_window_ms,
     hold_start_after_recent_end,
     is_recording_segment_end_bucket,
+    is_meaningful_streaming_end_candidate,
     is_recording_segment_start_bucket,
     is_true_bililive_end_bucket,
     is_true_bililive_start_bucket,
@@ -68,6 +70,7 @@ class EndTailOverwriteTest(unittest.TestCase):
                 "event_order": ["StreamStarted", "SessionStarted", "FileOpening"],
                 "window_ms": 60000,
                 "post_end_start_confirm_ms": 10000,
+                "streaming_end_confirm_ms": 90000,
             },
             created_at=0.0,
             request_path="/webhook",
@@ -389,6 +392,84 @@ class EndTailOverwriteTest(unittest.TestCase):
 
         self.assertTrue(is_recording_segment_end_bucket(bucket))
         self.assertFalse(is_true_bililive_end_bucket(bucket))
+
+    def test_large_streaming_end_candidate_waits_longer_for_streamended(self) -> None:
+        bucket = self.make_bucket()
+        bucket.group_config["streaming_end_confirm_ms"] = 90000
+        bucket.events["FileClosed"] = {
+            "request_id": "main-fc",
+            "ts": "t1",
+            "payload": {
+                "EventType": "FileClosed",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "RelativePath": "rec/main.flv",
+                    "FileSize": 13928811009,
+                    "Duration": 12097.987,
+                    "Streaming": True,
+                    "Recording": True,
+                },
+            },
+        }
+        bucket.events["SessionEnded"] = {
+            "request_id": "main-se",
+            "ts": "t2",
+            "payload": {
+                "EventType": "SessionEnded",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "SessionId": "main-session",
+                    "Streaming": True,
+                    "Recording": False,
+                },
+            },
+        }
+
+        self.assertTrue(is_recording_segment_end_bucket(bucket))
+        self.assertTrue(is_meaningful_streaming_end_candidate(bucket))
+        self.assertEqual(get_streaming_end_confirm_window_ms(self.make_config(), bucket), 90000)
+
+    def test_tiny_streaming_end_candidate_can_still_be_suppressed_as_segment(self) -> None:
+        bucket = self.make_bucket()
+        bucket.events["FileClosed"] = {
+            "request_id": "tiny-fc",
+            "ts": "t1",
+            "payload": {
+                "EventType": "FileClosed",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "RelativePath": "rec/tiny.flv",
+                    "FileSize": 163724,
+                    "Duration": 7.283,
+                    "Streaming": True,
+                    "Recording": True,
+                },
+            },
+        }
+        bucket.events["SessionEnded"] = {
+            "request_id": "tiny-se",
+            "ts": "t2",
+            "payload": {
+                "EventType": "SessionEnded",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "SessionId": "tiny-session",
+                    "Streaming": True,
+                    "Recording": False,
+                },
+            },
+        }
+
+        self.assertTrue(is_recording_segment_end_bucket(bucket))
+        self.assertFalse(is_meaningful_streaming_end_candidate(bucket))
 
     def test_streamended_is_true_end_even_if_stats_payload_streaming_true(self) -> None:
         bucket = self.make_bucket()
