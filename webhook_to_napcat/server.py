@@ -27,6 +27,8 @@ AGGREGATE_LOCK = threading.Lock()
 AGGREGATE_BUCKETS: dict[str, "AggregateBucket"] = {}
 PENDING_END_LOCK = threading.Lock()
 PENDING_END_NOTIFICATIONS: dict[str, "PendingEndNotification"] = {}
+PENDING_START_AFTER_END_LOCK = threading.Lock()
+PENDING_START_AFTER_END_NOTIFICATIONS: dict[str, "PendingStartAfterEndNotification"] = {}
 RECENT_START_LOCK = threading.Lock()
 RECENT_FORWARDED_STARTS: dict[str, "RecentForwardedStart"] = {}
 RECENT_END_LOCK = threading.Lock()
@@ -83,6 +85,15 @@ class PendingEndNotification:
     expires_at: float
     timer: threading.Timer | None = None
     stream_end_bucket: AggregateBucket | None = None
+
+
+@dataclass
+class PendingStartAfterEndNotification:
+    key: str
+    bucket: AggregateBucket
+    expires_at: float
+    timer: threading.Timer | None = None
+    window_ms: int = 0
 
 
 @dataclass
@@ -2023,6 +2034,129 @@ def clear_recent_forwarded_end(notify_key: str) -> None:
 
 
 
+def get_start_after_end_confirm_window_ms(cfg: Config, bucket: AggregateBucket | None = None) -> int:
+    configured_window = None
+    if bucket is not None:
+        configured_window = safe_int(bucket.group_config.get("post_end_start_confirm_ms"))
+    if configured_window is None:
+        configured_window = safe_int(os.getenv("WEBHOOK_POST_END_START_CONFIRM_MS"))
+    if configured_window is not None:
+        return max(0, configured_window)
+    return 45_000
+
+
+
+def flush_pending_start_after_end(cfg: Config, notify_key: str) -> None:
+    with PENDING_START_AFTER_END_LOCK:
+        pending = PENDING_START_AFTER_END_NOTIFICATIONS.pop(notify_key, None)
+    if pending is None:
+        return
+
+    # The suspected reconnect survived the post-end confirmation window without a
+    # follow-up true end, so treat it as a real reconnect/new start.
+    clear_recent_forwarded_end(notify_key)
+    deliver_aggregate_bucket(
+        cfg,
+        pending.bucket,
+        debounce_info={
+            "mode": "post_end_start_confirm_window",
+            "status": "expired_forwarded_reconnect_start",
+            "key": notify_key,
+            "window_ms": pending.window_ms,
+        },
+    )
+
+
+
+def hold_start_after_recent_end(cfg: Config, notify_key: str, bucket: AggregateBucket, preview_text: str) -> bool:
+    window_ms = get_start_after_end_confirm_window_ms(cfg, bucket)
+    if window_ms <= 0:
+        return False
+
+    created_pending = False
+    merged_pending = False
+    now_ts = time.time()
+    with PENDING_START_AFTER_END_LOCK:
+        pending = PENDING_START_AFTER_END_NOTIFICATIONS.get(notify_key)
+        if pending is not None and pending.expires_at <= now_ts:
+            pending = None
+            PENDING_START_AFTER_END_NOTIFICATIONS.pop(notify_key, None)
+        if pending is None:
+            timer = threading.Timer(window_ms / 1000, flush_pending_start_after_end, args=(cfg, notify_key))
+            timer.daemon = True
+            pending = PendingStartAfterEndNotification(
+                key=notify_key,
+                bucket=bucket,
+                expires_at=time.time() + window_ms / 1000,
+                timer=timer,
+                window_ms=window_ms,
+            )
+            PENDING_START_AFTER_END_NOTIFICATIONS[notify_key] = pending
+            timer.start()
+            created_pending = True
+        else:
+            merge_aggregate_bucket(pending.bucket, bucket)
+            merged_pending = True
+
+    message, aggregate_meta = build_aggregate_message(bucket)
+    message_record = build_aggregate_message_record(bucket, aggregate_meta)
+    message_record["forward_text"] = preview_text
+    if message:
+        message_record["message_mode"] = message.get("mode")
+    message_record["outcome"] = "held"
+    message_record["debounce"] = {
+        "mode": "post_end_start_confirm_window",
+        "status": "held_reconnect_start_after_recent_end" if created_pending else "merged_reconnect_start_after_recent_end",
+        "key": notify_key,
+        "window_ms": window_ms,
+        "remaining_ms": int((pending.expires_at - time.time()) * 1000),
+    }
+    if created_pending:
+        message_record["debounce"]["created_pending"] = True
+    if merged_pending:
+        message_record["debounce"]["merged_pending"] = True
+    append_message_log(cfg, message_record)
+    eprint(
+        json.dumps(
+            {
+                "event": "aggregate_post_end_start_held",
+                "group_key": bucket.key,
+                "group_name": bucket.group_name,
+                "request_ids": bucket.request_ids,
+                "debounce": message_record["debounce"],
+            },
+            ensure_ascii=False,
+        )
+    )
+    return True
+
+
+
+def cancel_pending_start_after_end(
+    cfg: Config, notify_key: str, *, reason: str, end_bucket: AggregateBucket | None = None
+) -> bool:
+    with PENDING_START_AFTER_END_LOCK:
+        pending = PENDING_START_AFTER_END_NOTIFICATIONS.pop(notify_key, None)
+    if pending is None:
+        return False
+
+    if pending.timer is not None:
+        pending.timer.cancel()
+
+    debounce_info: dict[str, Any] = {
+        "mode": "post_end_start_confirm_window",
+        "status": reason,
+        "key": notify_key,
+        "window_ms": pending.window_ms,
+    }
+    if end_bucket is not None:
+        debounce_info["cancelled_by_event_types"] = sorted(end_bucket.events.keys())
+        debounce_info["cancelled_by_request_ids"] = list(end_bucket.request_ids)
+    suppress_aggregate_bucket(cfg, pending.bucket, debounce_info=debounce_info)
+    return True
+
+
+
 def is_true_bililive_end_bucket(bucket: AggregateBucket) -> bool:
     if bucket.group_name != "bililive_end":
         return False
@@ -2337,6 +2471,10 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
             )
             return True
 
+        recent_end = get_recent_forwarded_end(notify_key)
+        if recent_end is not None and hold_start_after_recent_end(cfg, notify_key, bucket, preview_text):
+            return True
+
         clear_recent_forwarded_end(notify_key)
         deliver_aggregate_bucket(
             cfg,
@@ -2349,6 +2487,37 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
             },
         )
         return True
+
+    if is_true_bililive_end_bucket(bucket):
+        cancelled_pending_start = cancel_pending_start_after_end(
+            cfg,
+            notify_key,
+            reason="cancelled_by_followup_true_end",
+            end_bucket=bucket,
+        )
+        if cancelled_pending_start:
+            message_record["forward_text"] = preview_text
+            message_record["outcome"] = "suppressed"
+            message_record["debounce"] = {
+                "mode": "post_end_start_confirm_window",
+                "status": "suppressed_followup_true_end_cancelled_pending_reconnect_start",
+                "key": notify_key,
+                "event_types": sorted(event_types),
+            }
+            append_message_log(cfg, message_record)
+            eprint(
+                json.dumps(
+                    {
+                        "event": "aggregate_followup_end_after_post_end_start_suppressed",
+                        "group_key": bucket.key,
+                        "group_name": bucket.group_name,
+                        "request_ids": bucket.request_ids,
+                        "debounce": message_record["debounce"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return True
 
     with PENDING_END_LOCK:
         existing_pending = PENDING_END_NOTIFICATIONS.get(notify_key)

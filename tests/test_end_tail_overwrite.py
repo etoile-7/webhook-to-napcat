@@ -5,7 +5,10 @@ from webhook_to_napcat.server import (
     Config,
     build_end_bucket_metrics,
     build_start_bucket_score,
+    cancel_pending_start_after_end,
     get_bucket_field_value,
+    get_start_after_end_confirm_window_ms,
+    hold_start_after_recent_end,
     is_recording_segment_end_bucket,
     is_recording_segment_start_bucket,
     is_true_bililive_end_bucket,
@@ -61,7 +64,11 @@ class EndTailOverwriteTest(unittest.TestCase):
             key="aggregate:bililive_start:start:22625027:乃琳Queen",
             phase="start",
             group_name="bililive_start",
-            group_config={"event_order": ["StreamStarted", "SessionStarted", "FileOpening"], "window_ms": 60000},
+            group_config={
+                "event_order": ["StreamStarted", "SessionStarted", "FileOpening"],
+                "window_ms": 60000,
+                "post_end_start_confirm_ms": 10000,
+            },
             created_at=0.0,
             request_path="/webhook",
             remote_ip="127.0.0.1",
@@ -285,6 +292,36 @@ class EndTailOverwriteTest(unittest.TestCase):
 
         self.assertFalse(is_recording_segment_start_bucket(bucket))
         self.assertTrue(is_true_bililive_start_bucket(bucket))
+
+    def test_post_end_reconnect_start_can_be_held_and_cancelled_by_followup_end(self) -> None:
+        cfg = self.make_config()
+        bucket = self.make_start_bucket()
+        notify_key = "bililive:22625027:乃琳Queen:post-end-jitter-test"
+        bucket.events["StreamStarted"] = {
+            "request_id": "stream-started",
+            "ts": "t1",
+            "payload": {
+                "EventType": "StreamStarted",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "post-end-jitter-test",
+                    "Streaming": True,
+                    "Recording": True,
+                },
+            },
+        }
+
+        self.assertEqual(get_start_after_end_confirm_window_ms(cfg, bucket), 10000)
+        self.assertTrue(hold_start_after_recent_end(cfg, notify_key, bucket, "preview"))
+        self.assertTrue(
+            cancel_pending_start_after_end(
+                cfg,
+                notify_key,
+                reason="cancelled_by_followup_true_end",
+                end_bucket=self.make_bucket(),
+            )
+        )
 
     def test_true_end_clears_start_dedupe_so_reconnect_start_is_allowed(self) -> None:
         cfg = self.make_config()
