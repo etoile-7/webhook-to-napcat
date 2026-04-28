@@ -1676,6 +1676,22 @@ def get_aggregate_group(cfg: Config, handler: BaseHTTPRequestHandler, payload: d
 
 
 
+def should_flush_aggregate_immediately(bucket: AggregateBucket, event_type: str) -> bool:
+    triggers = bucket.group_config.get("flush_immediately_on_event_types")
+    if not isinstance(triggers, list):
+        return False
+
+    event_type = str(event_type or "").strip()
+    if not event_type:
+        return False
+
+    for item in triggers:
+        if event_type == str(item or "").strip():
+            return True
+    return False
+
+
+
 def build_aggregate_message(bucket: AggregateBucket) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     context = build_aggregate_context(bucket)
     message, suppressed, targets_spec = select_aggregate_output(bucket, context)
@@ -2304,6 +2320,7 @@ def queue_aggregate_event(cfg: Config, handler: BaseHTTPRequestHandler, parsed: 
     group_name = str(group.get("name") or "aggregate_group")
     key = build_aggregate_key(group, payload, phase)
     should_start_timer = False
+    should_flush_now = False
 
     with AGGREGATE_LOCK:
         bucket = AGGREGATE_BUCKETS.get(key)
@@ -2349,6 +2366,11 @@ def queue_aggregate_event(cfg: Config, handler: BaseHTTPRequestHandler, parsed: 
             bucket.timer = timer
             timer.start()
 
+        should_flush_now = should_flush_aggregate_immediately(bucket, event_type)
+
+    if should_flush_now:
+        flush_aggregate_bucket(cfg, key)
+
     return {
         "queued": True,
         "phase": phase,
@@ -2356,6 +2378,7 @@ def queue_aggregate_event(cfg: Config, handler: BaseHTTPRequestHandler, parsed: 
         "group_key": key,
         "window_ms": window_ms,
         "event_type": str(payload.get("EventType") or "unknown"),
+        "flush_now": should_flush_now,
     }
 
 
