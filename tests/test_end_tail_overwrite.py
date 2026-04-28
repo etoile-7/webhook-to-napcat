@@ -8,7 +8,6 @@ from webhook_to_napcat.server import (
     cancel_pending_start_after_end,
     get_bucket_field_value,
     get_start_after_end_confirm_window_ms,
-    get_streaming_end_confirm_window_ms,
     hold_start_after_recent_end,
     is_recording_segment_end_bucket,
     is_meaningful_streaming_end_candidate,
@@ -70,7 +69,6 @@ class EndTailOverwriteTest(unittest.TestCase):
                 "event_order": ["StreamStarted", "SessionStarted", "FileOpening"],
                 "window_ms": 60000,
                 "post_end_start_confirm_ms": 10000,
-                "streaming_end_confirm_ms": 90000,
             },
             created_at=0.0,
             request_path="/webhook",
@@ -355,7 +353,7 @@ class EndTailOverwriteTest(unittest.TestCase):
         clear_recent_forwarded_start(notify_key)
         self.assertIsNone(get_recent_forwarded_start(notify_key))
 
-    def test_recording_segment_end_while_streaming_is_not_true_stream_end(self) -> None:
+    def test_meaningful_fileclosed_while_streaming_is_true_end(self) -> None:
         bucket = self.make_bucket()
         bucket.events["FileClosed"] = {
             "request_id": "segment-fc",
@@ -391,11 +389,11 @@ class EndTailOverwriteTest(unittest.TestCase):
         }
 
         self.assertTrue(is_recording_segment_end_bucket(bucket))
-        self.assertFalse(is_true_bililive_end_bucket(bucket))
+        self.assertTrue(is_meaningful_streaming_end_candidate(bucket))
+        self.assertTrue(is_true_bililive_end_bucket(bucket))
 
-    def test_large_streaming_end_candidate_waits_longer_for_streamended(self) -> None:
+    def test_large_streaming_end_candidate_is_meaningful_fileclosed_end(self) -> None:
         bucket = self.make_bucket()
-        bucket.group_config["streaming_end_confirm_ms"] = 90000
         bucket.events["FileClosed"] = {
             "request_id": "main-fc",
             "ts": "t1",
@@ -431,7 +429,7 @@ class EndTailOverwriteTest(unittest.TestCase):
 
         self.assertTrue(is_recording_segment_end_bucket(bucket))
         self.assertTrue(is_meaningful_streaming_end_candidate(bucket))
-        self.assertEqual(get_streaming_end_confirm_window_ms(self.make_config(), bucket), 90000)
+        self.assertTrue(is_true_bililive_end_bucket(bucket))
 
     def test_tiny_streaming_end_candidate_can_still_be_suppressed_as_segment(self) -> None:
         bucket = self.make_bucket()

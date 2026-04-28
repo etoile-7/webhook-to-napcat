@@ -87,7 +87,6 @@ class PendingEndNotification:
     stream_end_bucket: AggregateBucket | None = None
     created_at: float = field(default_factory=time.time)
     window_ms: int = 0
-    streaming_end_extended: bool = False
 
 
 @dataclass
@@ -2168,9 +2167,13 @@ def is_true_bililive_end_bucket(bucket: AggregateBucket) -> bool:
     if "StreamEnded" in event_types:
         return True
 
+    if is_meaningful_streaming_end_candidate(bucket):
+        return True
+
     metrics = build_end_bucket_metrics(bucket)
-    # Only an explicit Streaming=true means this is a recording/session rollover while
-    # the live stream is still active. Missing/unknown Streaming keeps legacy behavior.
+    # Only an explicit Streaming=true on a non-meaningful end candidate means this is
+    # probably a recording/session rollover while the live stream is still active.
+    # Missing/unknown Streaming keeps legacy behavior.
     return metrics.get("streaming") is not True
 
 
@@ -2209,69 +2212,6 @@ def is_meaningful_streaming_end_candidate(bucket: AggregateBucket) -> bool:
             total_revenue is not None and total_revenue > 1.0,
         ]
     )
-
-
-
-def get_streaming_end_confirm_window_ms(cfg: Config, bucket: AggregateBucket | None = None) -> int:
-    configured_window = None
-    if bucket is not None:
-        configured_window = safe_int(bucket.group_config.get("streaming_end_confirm_ms"))
-    if configured_window is None:
-        configured_window = safe_int(os.getenv("WEBHOOK_STREAMING_END_CONFIRM_MS"))
-    if configured_window is not None:
-        return max(0, configured_window)
-    return 90_000
-
-
-
-def extend_pending_end_for_stream_end(cfg: Config, notify_key: str, pending: PendingEndNotification, bucket: AggregateBucket) -> bool:
-    confirm_window_ms = get_streaming_end_confirm_window_ms(cfg, bucket)
-    if confirm_window_ms <= 0 or pending.streaming_end_extended:
-        return False
-
-    elapsed_ms = int((time.time() - pending.created_at) * 1000)
-    remaining_ms = max(0, confirm_window_ms - elapsed_ms)
-    if remaining_ms <= 0:
-        return False
-
-    timer = threading.Timer(remaining_ms / 1000, flush_pending_end_notification, args=(cfg, notify_key))
-    timer.daemon = True
-    pending.expires_at = time.time() + remaining_ms / 1000
-    pending.timer = timer
-    pending.window_ms = confirm_window_ms
-    pending.streaming_end_extended = True
-
-    with PENDING_END_LOCK:
-        PENDING_END_NOTIFICATIONS[notify_key] = pending
-        timer.start()
-
-    message, aggregate_meta = build_aggregate_message(bucket)
-    message_record = build_aggregate_message_record(bucket, aggregate_meta)
-    if message:
-        message_record["forward_text"] = get_rendered_message_preview(message) or "(rich media message)"
-        message_record["message_mode"] = message.get("mode")
-    message_record["outcome"] = "held"
-    message_record["debounce"] = {
-        "mode": "pending_end_window",
-        "status": "extended_waiting_for_stream_end_after_streaming_candidate",
-        "key": notify_key,
-        "window_ms": confirm_window_ms,
-        "remaining_ms": remaining_ms,
-    }
-    append_message_log(cfg, message_record)
-    eprint(
-        json.dumps(
-            {
-                "event": "aggregate_pending_end_extended_for_stream_end",
-                "group_key": bucket.key,
-                "group_name": bucket.group_name,
-                "request_ids": bucket.request_ids,
-                "debounce": message_record["debounce"],
-            },
-            ensure_ascii=False,
-        )
-    )
-    return True
 
 
 
@@ -2449,7 +2389,9 @@ def flush_pending_end_notification(cfg: Config, notify_key: str) -> None:
         "window_ms": max(0, int(cfg.notify_debounce_ms or 0)),
     }
     if is_recording_segment_end_bucket(bucket):
-        if is_meaningful_streaming_end_candidate(bucket) and extend_pending_end_for_stream_end(cfg, notify_key, pending, bucket):
+        if is_meaningful_streaming_end_candidate(bucket):
+            debounce_info["status"] = "expired_forwarded_meaningful_fileclosed"
+            deliver_aggregate_bucket(cfg, bucket, debounce_info=debounce_info)
             return
         debounce_info["status"] = "suppressed_recording_segment_end_while_streaming"
         suppress_aggregate_bucket(cfg, bucket, debounce_info=debounce_info)
