@@ -3,9 +3,11 @@ import unittest
 from webhook_to_napcat.server import (
     AggregateBucket,
     build_end_bucket_metrics,
+    build_start_bucket_score,
     get_bucket_field_value,
     should_replace_aggregate_bucket_event,
     should_suppress_recent_forwarded_end_candidate,
+    should_suppress_recent_forwarded_start_candidate,
 )
 
 
@@ -16,6 +18,19 @@ class EndTailOverwriteTest(unittest.TestCase):
             phase="end",
             group_name="bililive_end",
             group_config={"event_order": ["FileClosed", "SessionEnded", "StreamEnded"]},
+            created_at=0.0,
+            request_path="/webhook",
+            remote_ip="127.0.0.1",
+            auth={},
+            target={"private": 1, "group": None},
+        )
+
+    def make_start_bucket(self) -> AggregateBucket:
+        return AggregateBucket(
+            key="aggregate:bililive_start:start:22625027:乃琳Queen",
+            phase="start",
+            group_name="bililive_start",
+            group_config={"event_order": ["StreamStarted", "SessionStarted", "FileOpening"], "window_ms": 60000},
             created_at=0.0,
             request_path="/webhook",
             remote_ip="127.0.0.1",
@@ -179,6 +194,46 @@ class EndTailOverwriteTest(unittest.TestCase):
 
         recent_score = (1, 1, 1141, 5510, 226740, 2398, 2075784198)
         self.assertFalse(should_suppress_recent_forwarded_end_candidate(recent_score, bucket))
+
+    def test_recent_forwarded_start_suppresses_weaker_fileopening_tail(self) -> None:
+        bucket = self.make_start_bucket()
+        bucket.request_ids.extend(["fileopening-1"])
+        bucket.events["FileOpening"] = {
+            "request_id": "fileopening-1",
+            "ts": "t1",
+            "payload": {
+                "EventType": "FileOpening",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                },
+            },
+        }
+
+        recent_score = (1, 1, 0, 2)
+        self.assertEqual(build_start_bucket_score(bucket), (0, 0, 1, 1))
+        self.assertTrue(should_suppress_recent_forwarded_start_candidate(recent_score, bucket))
+
+    def test_recent_forwarded_start_keeps_stronger_streamstarted_followup(self) -> None:
+        bucket = self.make_start_bucket()
+        bucket.request_ids.extend(["stream-1"])
+        bucket.events["StreamStarted"] = {
+            "request_id": "stream-1",
+            "ts": "t1",
+            "payload": {
+                "EventType": "StreamStarted",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                },
+            },
+        }
+
+        recent_score = (0, 1, 0, 1)
+        self.assertEqual(build_start_bucket_score(bucket), (1, 0, 0, 1))
+        self.assertFalse(should_suppress_recent_forwarded_start_candidate(recent_score, bucket))
 
 
 if __name__ == "__main__":

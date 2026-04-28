@@ -27,6 +27,8 @@ AGGREGATE_LOCK = threading.Lock()
 AGGREGATE_BUCKETS: dict[str, "AggregateBucket"] = {}
 PENDING_END_LOCK = threading.Lock()
 PENDING_END_NOTIFICATIONS: dict[str, "PendingEndNotification"] = {}
+RECENT_START_LOCK = threading.Lock()
+RECENT_FORWARDED_STARTS: dict[str, "RecentForwardedStart"] = {}
 RECENT_END_LOCK = threading.Lock()
 RECENT_FORWARDED_ENDS: dict[str, "RecentForwardedEnd"] = {}
 PRICE_TABLE_CACHE: dict[str, dict[str, float]] = {}
@@ -81,6 +83,13 @@ class PendingEndNotification:
     expires_at: float
     timer: threading.Timer | None = None
     stream_end_bucket: AggregateBucket | None = None
+
+
+@dataclass
+class RecentForwardedStart:
+    key: str
+    score: tuple[int, int, int, int]
+    expires_at: float
 
 
 @dataclass
@@ -1878,6 +1887,67 @@ def is_trivial_trailing_end_bucket(bucket: AggregateBucket) -> bool:
 
 
 
+def build_start_bucket_score(bucket: AggregateBucket) -> tuple[int, int, int, int]:
+    event_types = set(bucket.events.keys())
+    return (
+        1 if "StreamStarted" in event_types else 0,
+        1 if "SessionStarted" in event_types else 0,
+        1 if "FileOpening" in event_types else 0,
+        len(bucket.request_ids),
+    )
+
+
+
+def get_recent_start_suppress_window_ms(cfg: Config, bucket: AggregateBucket) -> int:
+    group_window_ms = int(bucket.group_config.get("window_ms", cfg.aggregate_window_ms) or cfg.aggregate_window_ms)
+    base_window = max(0, int(cfg.notify_debounce_ms or 0))
+    return max(15_000, base_window, max(0, group_window_ms))
+
+
+
+def get_recent_forwarded_start(notify_key: str) -> RecentForwardedStart | None:
+    now_ts = time.time()
+    with RECENT_START_LOCK:
+        recent = RECENT_FORWARDED_STARTS.get(notify_key)
+        if recent is None:
+            return None
+        if recent.expires_at <= now_ts:
+            RECENT_FORWARDED_STARTS.pop(notify_key, None)
+            return None
+        return recent
+
+
+
+def remember_recent_forwarded_start(cfg: Config, notify_key: str, bucket: AggregateBucket) -> None:
+    if not notify_key:
+        return
+
+    recent = RecentForwardedStart(
+        key=notify_key,
+        score=build_start_bucket_score(bucket),
+        expires_at=time.time() + get_recent_start_suppress_window_ms(cfg, bucket) / 1000,
+    )
+    with RECENT_START_LOCK:
+        RECENT_FORWARDED_STARTS[notify_key] = recent
+
+
+
+def clear_recent_forwarded_start(notify_key: str) -> None:
+    if not notify_key:
+        return
+    with RECENT_START_LOCK:
+        RECENT_FORWARDED_STARTS.pop(notify_key, None)
+
+
+
+def should_suppress_recent_forwarded_start_candidate(
+    recent_score: tuple[int, int, int, int], candidate_bucket: AggregateBucket
+) -> bool:
+    candidate_score = build_start_bucket_score(candidate_bucket)
+    return candidate_score <= recent_score
+
+
+
 def get_recent_end_suppress_window_ms(cfg: Config) -> int:
     base_window = max(0, int(cfg.notify_debounce_ms or 0))
     return max(120_000, base_window * 8)
@@ -1995,8 +2065,12 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info
         if send_info.get("fallback_reason"):
             message_record["fallback_reason"] = send_info.get("fallback_reason")
         append_message_log(cfg, message_record)
-        if bucket.group_name == "bililive_end":
-            remember_recent_forwarded_end(cfg, build_bililive_notification_key(aggregate_meta), bucket)
+        notify_key = build_bililive_notification_key(aggregate_meta)
+        if bucket.group_name == "bililive_start":
+            remember_recent_forwarded_start(cfg, notify_key, bucket)
+        elif bucket.group_name == "bililive_end":
+            clear_recent_forwarded_start(notify_key)
+            remember_recent_forwarded_end(cfg, notify_key, bucket)
         eprint(
             json.dumps(
                 {
@@ -2110,6 +2184,34 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
                 json.dumps(
                     {
                         "event": "aggregate_pending_end_suppressed_start",
+                        "group_key": bucket.key,
+                        "group_name": bucket.group_name,
+                        "request_ids": bucket.request_ids,
+                        "debounce": message_record["debounce"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return True
+
+        recent_start = get_recent_forwarded_start(notify_key)
+        if recent_start is not None and should_suppress_recent_forwarded_start_candidate(recent_start.score, bucket):
+            candidate_score = build_start_bucket_score(bucket)
+            message_record["forward_text"] = preview_text
+            message_record["outcome"] = "suppressed"
+            message_record["debounce"] = {
+                "mode": "recent_forwarded_start_window",
+                "status": "suppressed_after_recent_forwarded_start",
+                "key": notify_key,
+                "candidate_score": list(candidate_score),
+                "kept_score": list(recent_start.score),
+                "remaining_ms": int((recent_start.expires_at - time.time()) * 1000),
+            }
+            append_message_log(cfg, message_record)
+            eprint(
+                json.dumps(
+                    {
+                        "event": "aggregate_recent_start_suppressed",
                         "group_key": bucket.key,
                         "group_name": bucket.group_name,
                         "request_ids": bucket.request_ids,
