@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import json
 import os
 import re
@@ -543,11 +544,100 @@ def summarize_payload(payload: Any) -> str:
 
 
 
+def merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow recursive merge for JSON object configs."""
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if key.startswith("$"):
+            continue
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = merge_dicts(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+
+def normalize_rules_doc(data: dict[str, Any]) -> dict[str, Any]:
+    """Expand named output/target references in rules.json.
+
+    This keeps deployment configs layered: define shared outputs/targets once at the
+    top level, then reference them from aggregate/rule outputs with `output_ref`,
+    `use`, `output: {"$ref": "..."}`, or `targets_ref`.
+    """
+    doc = copy.deepcopy(data)
+    output_defs = doc.get("outputs") if isinstance(doc.get("outputs"), dict) else {}
+    target_defs = doc.get("targets") if isinstance(doc.get("targets"), dict) else {}
+
+    resolving_outputs: set[str] = set()
+
+    def resolve_targets_ref(obj: dict[str, Any]) -> dict[str, Any]:
+        ref = obj.get("targets_ref")
+        if isinstance(ref, str) and ref in target_defs and obj.get("targets") is None and obj.get("target") is None:
+            obj["targets"] = copy.deepcopy(target_defs[ref])
+        return obj
+
+    def resolve_output_ref(ref: str) -> dict[str, Any]:
+        if ref in resolving_outputs:
+            raise ValueError(f"circular output_ref: {ref}")
+        raw = output_defs.get(ref)
+        if not isinstance(raw, dict):
+            raise KeyError(f"unknown output_ref: {ref}")
+        resolving_outputs.add(ref)
+        try:
+            return resolve_output_spec(copy.deepcopy(raw))
+        finally:
+            resolving_outputs.remove(ref)
+
+    def resolve_output_spec(output: dict[str, Any]) -> dict[str, Any]:
+        ref = output.get("$ref") or output.get("output_ref") or output.get("use")
+        if isinstance(ref, str):
+            base = resolve_output_ref(ref)
+            overrides = {k: v for k, v in output.items() if k not in {"$ref", "output_ref", "use"}}
+            output = merge_dicts(base, overrides)
+        return resolve_targets_ref(output)
+
+    def normalize_rule_like(rule: Any) -> Any:
+        if not isinstance(rule, dict):
+            return rule
+        rule = copy.deepcopy(rule)
+        ref = rule.pop("output_ref", None) or rule.pop("use", None)
+        if isinstance(ref, str) and "output" not in rule:
+            rule["output"] = resolve_output_ref(ref)
+        elif isinstance(rule.get("output"), dict):
+            rule["output"] = resolve_output_spec(rule["output"])
+        resolve_targets_ref(rule)
+        return rule
+
+    if isinstance(doc.get("rules"), list):
+        doc["rules"] = [normalize_rule_like(rule) for rule in doc["rules"]]
+
+    if isinstance(doc.get("default"), dict):
+        # `default` is an output spec, not a full rule object.
+        doc["default"] = resolve_output_spec(copy.deepcopy(doc["default"]))
+
+    aggregate = doc.get("aggregate")
+    if isinstance(aggregate, dict) and isinstance(aggregate.get("groups"), list):
+        for group in aggregate["groups"]:
+            if not isinstance(group, dict):
+                continue
+            if isinstance(group.get("outputs"), list):
+                group["outputs"] = [normalize_rule_like(item) for item in group["outputs"]]
+            if isinstance(group.get("output"), dict):
+                group["output"] = resolve_output_spec(group["output"])
+            resolve_targets_ref(group)
+
+    return doc
+
+
+
 def load_rules(path: str) -> dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        return normalize_rules_doc(data)
     except FileNotFoundError:
         return {}
     except Exception as exc:  # noqa: BLE001

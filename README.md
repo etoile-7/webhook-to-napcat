@@ -419,6 +419,62 @@ python3 scripts/fetch_bilibili_room_covers.py \
 
 这样以后改“开播啦 / 下播啦 / 时间放哪 / 哪几类事件合并 / 哪些事件 suppress”，都主要改本地 `rules.json`，不用再改 Python 源码。
 
+### 分级配置：复用输出模板和目标
+
+`rules.json` 支持把常用输出和目标先定义在顶层，再在规则里引用，避免每个直播间重复写一大段模板：
+
+- 顶层 `outputs`：命名输出模板
+- 顶层 `targets`：命名目标列表
+- 规则中可用 `output_ref` / `use` 引用命名输出
+- 也可写 `"output": {"$ref": "名字", ...覆盖字段 }`
+- 输出或规则中可用 `targets_ref` 引用命名目标；如果同一层已经显式写了 `targets` / `target`，显式配置优先
+
+示例：
+
+```json
+{
+  "targets": {
+    "bella_groups": ["default", { "group": 162525281 }]
+  },
+  "outputs": {
+    "start_default": {
+      "type": "template",
+      "template": "🟢［{name}］开播啦！\n标题：{title}\n房间：{room_id}\n时间：{time}"
+    },
+    "bella_start": {
+      "type": "segments",
+      "segments": [
+        { "type": "text", "text": "🟢［{name}］开播啦！" },
+        { "type": "image", "file": "/app/up/bella_kira_live_cover.jpg" },
+        { "type": "text", "text": "标题：{title}\n房间：{room_id}\n时间：{time}" }
+      ],
+      "fallback_template": "🟢［{name}］开播啦！\n标题：{title}\n房间：{room_id}\n时间：{time}",
+      "targets_ref": "bella_groups"
+    }
+  },
+  "aggregate": {
+    "groups": [
+      {
+        "name": "bililive_start",
+        "outputs": [
+          {
+            "match": {
+              "event_types_all": ["StreamStarted"],
+              "field_equals": { "room_id": 22632424 }
+            },
+            "output_ref": "bella_start"
+          },
+          {
+            "match": { "event_types_all": ["StreamStarted"] },
+            "output_ref": "start_default"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 补充：`bililive_end` 结束阶段现在会在等待窗口内同时缓存：
 
 - `StreamEnded`（用于确认真正下播）

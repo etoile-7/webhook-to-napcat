@@ -1,4 +1,13 @@
 {
+  "outputs": {
+    "content_only": {
+      "type": "field",
+      "field": "content"
+    },
+    "summary": {
+      "type": "summary"
+    }
+  },
   "rules": [
     {
       "name": "sms_content_only",
@@ -6,13 +15,10 @@
       "match": {
         "has_keys": ["content"]
       },
-      "output": {
-        "type": "field",
-        "field": "content"
-      }
+      "output_ref": "content_only"
     }
   ],
   "default": {
-    "type": "summary"
+    "$ref": "summary"
   }
 }
