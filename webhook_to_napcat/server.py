@@ -744,6 +744,42 @@ def build_rendered_text_message(text: str | None) -> dict[str, Any] | None:
 
 
 
+def build_template_with_cover_message(output: dict[str, Any], payload: Any) -> dict[str, Any] | None:
+    text = render_template_text(output.get("template", ""), payload)
+    cover_file = render_template_text(output.get("cover_file"), payload)
+    if not cover_file:
+        return build_rendered_text_message(text)
+
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    text = text.strip()
+    first_line, sep, rest = text.partition("\n")
+    segments: list[dict[str, Any]] = []
+    if first_line.strip():
+        segments.append({"type": "text", "data": {"text": first_line.strip()}})
+
+    image_spec: dict[str, Any] = {"type": "image", "file": cover_file}
+    for source_key, target_key in {
+        "cover_proxy": "proxy",
+        "cover_cache": "cache",
+        "cover_timeout": "timeout",
+    }.items():
+        if output.get(source_key) is not None:
+            image_spec[target_key] = output.get(source_key)
+    image_segment = render_message_segment(image_spec, payload)
+    if image_segment is not None:
+        segments.append(image_segment)
+
+    if sep and rest.strip():
+        segments.append({"type": "text", "data": {"text": rest.strip()}})
+
+    if not segments:
+        return build_rendered_text_message(text)
+    return {"mode": "segments", "segments": segments, "fallback_text": text}
+
+
+
 def render_message_segment(spec: Any, payload: Any) -> dict[str, Any] | None:
     if not isinstance(spec, dict):
         return None
@@ -793,6 +829,8 @@ def render_rule_output(rule: dict[str, Any], payload: Any) -> dict[str, Any] | N
         return None
 
     if kind == "template":
+        if output.get("cover_file") is not None:
+            return build_template_with_cover_message(output, payload)
         return build_rendered_text_message(render_template_text(output.get("template", ""), payload))
 
     if kind == "summary":

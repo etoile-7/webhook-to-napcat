@@ -428,6 +428,7 @@ python3 scripts/fetch_bilibili_room_covers.py \
 - 规则中可用 `output_ref` / `use` 引用命名输出
 - 也可写 `"output": {"$ref": "名字", ...覆盖字段 }`
 - 输出或规则中可用 `targets_ref` 引用命名目标；如果同一层已经显式写了 `targets` / `target`，显式配置优先
+- `template` 输出可额外写 `cover_file`，渲染时会自动变成「第一行文字 + 图片 + 剩余文字」的 segments；适合个别直播间在通用开播模板基础上加封面图
 
 示例：
 
@@ -440,16 +441,6 @@ python3 scripts/fetch_bilibili_room_covers.py \
     "start_default": {
       "type": "template",
       "template": "🟢［{name}］开播啦！\n标题：{title}\n房间：{room_id}\n时间：{time}"
-    },
-    "bella_start": {
-      "type": "segments",
-      "segments": [
-        { "type": "text", "text": "🟢［{name}］开播啦！" },
-        { "type": "image", "file": "/app/up/bella_kira_live_cover.jpg" },
-        { "type": "text", "text": "标题：{title}\n房间：{room_id}\n时间：{time}" }
-      ],
-      "fallback_template": "🟢［{name}］开播啦！\n标题：{title}\n房间：{room_id}\n时间：{time}",
-      "targets_ref": "bella_groups"
     }
   },
   "aggregate": {
@@ -462,7 +453,11 @@ python3 scripts/fetch_bilibili_room_covers.py \
               "event_types_all": ["StreamStarted"],
               "field_equals": { "room_id": 22632424 }
             },
-            "output_ref": "bella_start"
+            "output": {
+              "$ref": "start_default",
+              "cover_file": "/app/up/bella_kira_live_cover.jpg"
+            },
+            "targets_ref": "bella_groups"
           },
           {
             "match": { "event_types_all": ["StreamStarted"] },

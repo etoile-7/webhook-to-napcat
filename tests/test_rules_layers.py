@@ -1,6 +1,6 @@
 import unittest
 
-from webhook_to_napcat.server import normalize_rules_doc
+from webhook_to_napcat.server import normalize_rules_doc, render_rule_output
 
 
 class RulesLayersTest(unittest.TestCase):
@@ -70,6 +70,25 @@ class RulesLayersTest(unittest.TestCase):
         self.assertEqual(output["template"], "override")
         self.assertEqual(output["targets"], ["default"])
         self.assertEqual(doc["default"]["template"], "fallback")
+
+    def test_template_output_can_add_cover_file_as_segments(self) -> None:
+        rendered = render_rule_output(
+            {
+                "output": {
+                    "type": "template",
+                    "template": "🟢［{name}］开播啦！\n标题：{title}\n房间：{room_id}",
+                    "cover_file": "/app/up/{room_id}.jpg",
+                }
+            },
+            {"name": "嘉然今天吃什么", "title": "测试", "room_id": 22637261},
+        )
+
+        self.assertEqual(rendered["mode"], "segments")
+        self.assertEqual(rendered["fallback_text"], "🟢［嘉然今天吃什么］开播啦！\n标题：测试\n房间：22637261")
+        self.assertEqual(rendered["segments"][0]["data"]["text"], "🟢［嘉然今天吃什么］开播啦！")
+        self.assertEqual(rendered["segments"][1]["type"], "image")
+        self.assertEqual(rendered["segments"][1]["data"]["file"], "/app/up/22637261.jpg")
+        self.assertEqual(rendered["segments"][2]["data"]["text"], "标题：测试\n房间：22637261")
 
 
 if __name__ == "__main__":
