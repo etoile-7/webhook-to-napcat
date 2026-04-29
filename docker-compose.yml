@@ -64,6 +64,7 @@ services:
     volumes:
       # 将规则模板文件挂载进容器；后续改规则只需要编辑这个文件
       - "./rules.json:/app/rules.json:ro"
+      - "./cover:/app/cover:ro"
       # 将消息日志持久化到宿主机
       - "/opt/WebhookToNapcat/logs:/logs"
 

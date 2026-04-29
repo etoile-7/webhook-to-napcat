@@ -343,20 +343,20 @@ image: ghcr.io/etoile-7/webhook-to-napcat:latest
 }
 ```
 
-静态直播间封面示例：
+静态直播间封面示例：先在聚合组 `context` 里把封面文件读成 `base64://...`，再在需要封面的直播间细分规则里用 `cover_file: "{cover_base64}"`。这样发送给 NapCat 的是 base64 图片，不依赖 NapCat 容器里的文件映射路径。
 
 ```json
 {
   "context": {
     "cover_base64": {
       "source": "room_cover_base64",
-      "index_path": "/opt/WebhookToNapcat/cover/index.json"
+      "index_path": "cover/index.json"
     }
   }
 }
 ```
 
-可以配合仓库里的抓取脚本，先把常用直播间封面落盘到宿主机：
+Docker 部署时记得把工作目录的 `cover/` 挂到容器工作目录，例如：`./cover:/app/cover:ro`。可以配合仓库里的抓取脚本，先把常用直播间封面落盘到宿主机：
 
 ```bash
 python3 scripts/fetch_bilibili_room_covers.py \
@@ -428,15 +428,12 @@ python3 scripts/fetch_bilibili_room_covers.py \
 - 规则中可用 `output_ref` / `use` 引用命名输出
 - 也可写 `"output": {"$ref": "名字", ...覆盖字段 }`
 - 输出或规则中可用 `targets_ref` 引用命名目标；如果同一层已经显式写了 `targets` / `target`，显式配置优先
-- `template` 输出可额外写 `cover_file`，渲染时会自动变成「第一行文字 + 图片 + 剩余文字」的 segments；适合个别直播间在通用开播模板基础上加封面图
+- `template` 输出可额外写 `cover_file`，渲染时会自动变成「第一行文字 + 图片 + 剩余文字」的 segments；`cover_file` 可以是 `base64://...`，推荐配合 `room_cover_base64` 从工作目录 `cover/` 读取封面并转成 base64 后发送
 
 示例：
 
 ```json
 {
-  "targets": {
-    "bella_groups": ["default", { "group": 162525281 }]
-  },
   "outputs": {
     "start_default": {
       "type": "template",
@@ -447,6 +444,12 @@ python3 scripts/fetch_bilibili_room_covers.py \
     "groups": [
       {
         "name": "bililive_start",
+        "context": {
+          "cover_base64": {
+            "source": "room_cover_base64",
+            "index_path": "cover/index.json"
+          }
+        },
         "outputs": [
           {
             "match": {
@@ -455,9 +458,9 @@ python3 scripts/fetch_bilibili_room_covers.py \
             },
             "output": {
               "$ref": "start_default",
-              "cover_file": "/app/up/bella_kira_live_cover.jpg"
+              "cover_file": "{cover_base64}"
             },
-            "targets_ref": "bella_groups"
+            "targets": ["default", { "group": 162525281 }]
           },
           {
             "match": { "event_types_all": ["StreamStarted"] },
