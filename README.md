@@ -35,13 +35,13 @@ environment:
   NAPCAT_TOKEN_MODE: "header"
   NAPCAT_PRIVATE_QQ: "YOUR_QQ_NUMBER"
   NAPCAT_GROUP_QQ: ""
-  WEBHOOK_LOG_DIR: "/logs"
+  WEBHOOK_LOG_DIR: "/app/logs"
 ```
 
 ```yaml
 volumes:
-  - "./rules.json:/app/rules.json:ro"
-  - "/opt/WebhookToNapcat/logs:/logs"
+  # rules.json / cover / logs 共用同一个工作目录
+  - ".:/app"
 ```
 
 至少改这两项：
@@ -70,16 +70,16 @@ docker compose ps
 docker compose logs -f
 ```
 
-消息日志默认会额外落盘到宿主机：
+消息日志默认会落盘到当前工作目录：
 
 ```text
-/opt/WebhookToNapcat/logs
+./logs
 ```
 
 容器内对应目录是：
 
 ```text
-/logs
+/app/logs
 ```
 
 日志按分层写入：
@@ -98,11 +98,11 @@ docker run -d \
   --restart unless-stopped \
   --add-host=host.docker.internal:host-gateway \
   -p 8787:8787 \
-  -v /opt/WebhookToNapcat/logs:/logs \
+  -v /opt/WebhookToNapcat:/app \
   -e LISTEN_HOST=0.0.0.0 \
   -e LISTEN_PORT=8787 \
   -e WEBHOOK_PATH=/webhook \
-  -e WEBHOOK_LOG_DIR=/logs \
+  -e WEBHOOK_LOG_DIR=/app/logs \
   -e NAPCAT_BASE_URL=http://host.docker.internal:3001 \
   -e NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER \
   ghcr.io/etoile-7/webhook-to-napcat:latest
@@ -134,7 +134,7 @@ docker run -d \
 | `NAPCAT_TIMEOUT` | 单次请求超时时间 |
 | `NAPCAT_RETRIES` | 重试次数 |
 | `WEBHOOK_RULES_PATH` | 规则文件路径，默认 `/app/rules.json` |
-| `WEBHOOK_LOG_DIR` | 消息日志目录，默认 `/logs`，按月分层写入 `requests-YYYY-MM.jsonl` / `messages-YYYY-MM.jsonl` / `errors-YYYY-MM.jsonl` |
+| `WEBHOOK_LOG_DIR` | 消息日志目录，程序默认 `/logs`；推荐 compose 部署设为 `/app/logs`，按月分层写入 `requests-YYYY-MM.jsonl` / `messages-YYYY-MM.jsonl` / `errors-YYYY-MM.jsonl` |
 | `WEBHOOK_AGGREGATE_WINDOW_MS` | BililiveRecorder 事件聚合窗口（毫秒），默认 `3000` |
 | `WEBHOOK_NOTIFY_FILE_OPENING` | 是否单独发送 `FileOpening` 事件，默认 `0`（只参与聚合不单发） |
 | `QQ_CHUNK_SIZE` | QQ 单条消息长度上限 |
@@ -356,7 +356,7 @@ image: ghcr.io/etoile-7/webhook-to-napcat:latest
 }
 ```
 
-Docker 部署时记得把工作目录的 `cover/` 挂到容器工作目录，例如：`./cover:/app/cover:ro`。可以配合仓库里的抓取脚本，先把常用直播间封面落盘到宿主机：
+Docker 部署时推荐把工作目录整体挂到 `/app`（例如 `.:/app`），这样 `rules.json`、`cover/`、`logs/` 共用同一个工作目录。可以配合仓库里的抓取脚本，先把常用直播间封面落盘到宿主机：
 
 ```bash
 python3 scripts/fetch_bilibili_room_covers.py \
