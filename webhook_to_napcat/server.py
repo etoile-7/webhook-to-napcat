@@ -36,6 +36,63 @@ RECENT_END_LOCK = threading.Lock()
 RECENT_FORWARDED_ENDS: dict[str, "RecentForwardedEnd"] = {}
 PRICE_TABLE_CACHE: dict[str, dict[str, float]] = {}
 BILIBILI_ROOM_INFO_CACHE: dict[str, dict[str, Any]] = {}
+BASE64_DATA_URI_RE = re.compile(r"^data:(?P<mime>[^;]+);base64,(?P<data>.*)$", re.S)
+MEDIA_MIME_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "image/tiff": ".tiff",
+    "image/x-icon": ".ico",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/aac": ".aac",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/flac": ".flac",
+    "audio/ogg": ".ogg",
+    "audio/opus": ".opus",
+    "video/mp4": ".mp4",
+    "video/mpeg": ".mpg",
+    "video/x-matroska": ".mkv",
+    "video/webm": ".webm",
+    "video/quicktime": ".mov",
+    "video/x-msvideo": ".avi",
+    "application/pdf": ".pdf",
+    "text/plain": ".txt",
+    "text/csv": ".csv",
+    "application/json": ".json",
+    "text/json": ".json",
+    "application/xml": ".xml",
+    "text/xml": ".xml",
+    "text/markdown": ".md",
+    "text/html": ".html",
+    "application/zip": ".zip",
+    "application/x-zip-compressed": ".zip",
+    "application/x-tar": ".tar",
+    "application/gzip": ".gz",
+    "application/x-gzip": ".gz",
+    "application/x-7z-compressed": ".7z",
+    "application/x-rar-compressed": ".rar",
+    "application/octet-stream": ".bin",
+}
+BASE64_FIELD_NAMES = {
+    "base64",
+    "base64_data",
+    "base64_png",
+    "png_base64",
+    "image_base64",
+    "cover_base64",
+    "content_base64",
+    "file_base64",
+    "raw_base64",
+    "blob",
+}
 
 
 @dataclass
@@ -59,6 +116,8 @@ class Config:
     aggregate_window_ms: int
     notify_file_opening: bool
     notify_debounce_ms: int
+    media_dir: str = "/app/media"
+    public_media_dir: str = "/opt/WebhookToNapcat/media"
 
 
 @dataclass
@@ -211,6 +270,231 @@ def file_to_base64_uri(path: str) -> str | None:
     if not data:
         return None
     return "base64://" + base64.b64encode(data).decode("ascii")
+
+
+
+def decode_base64_media(value: str) -> tuple[bytes | None, str | None]:
+    text = value.strip()
+    mime_type: str | None = None
+
+    data_uri_match = BASE64_DATA_URI_RE.match(text)
+    if data_uri_match:
+        mime_type = data_uri_match.group("mime").strip().lower() or None
+        text = data_uri_match.group("data").strip()
+    elif text.startswith("base64://"):
+        text = text[len("base64://") :].strip()
+
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return None, mime_type
+
+    try:
+        return base64.b64decode(compact, validate=True), mime_type
+    except Exception:  # noqa: BLE001
+        try:
+            padded = compact + ("=" * (-len(compact) % 4))
+            return base64.b64decode(padded, validate=False), mime_type
+        except Exception:  # noqa: BLE001
+            return None, mime_type
+
+
+
+def media_extension(mime_type: str | None, file_name: Any = None, default: str = ".bin") -> str:
+    if isinstance(file_name, str) and file_name.strip():
+        suffix = Path(file_name.strip()).suffix.lower()
+        if suffix:
+            return suffix
+    return MEDIA_MIME_EXTENSIONS.get((mime_type or "").strip().lower(), default)
+
+
+
+def safe_media_stem(value: Any, default: str) -> str:
+    raw = str(value or "").strip()
+    if raw:
+        raw = Path(raw).stem or Path(raw).name
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip(".-_")
+    return (cleaned[:96] if cleaned else default)
+
+
+
+def safe_path_component(value: Any, default: str = "asset") -> str:
+    raw = str(value or "").strip()
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip(".-_")
+    return (cleaned[:48] if cleaned else default)
+
+
+
+def persist_base64_media(
+    cfg: Config,
+    base64_value: str,
+    *,
+    mime_type: str | None = None,
+    file_name: Any = None,
+    id_hint: Any = None,
+    path_hint: Any = None,
+    namespace: str = "bili_upload_auto",
+) -> dict[str, Any]:
+    data, uri_mime_type = decode_base64_media(base64_value)
+    if data is None:
+        return {"ok": False, "error": "base64_decode_failed"}
+
+    resolved_mime_type = uri_mime_type or (mime_type.strip().lower() if isinstance(mime_type, str) and mime_type.strip() else None) or "application/octet-stream"
+    ext = media_extension(resolved_mime_type, file_name=file_name)
+    stem = safe_media_stem(id_hint or file_name or uuid4().hex, default="media")
+    date_part = datetime.now().strftime("%Y-%m-%d")
+    subdir = safe_path_component(path_hint, default="asset")
+    rel_path = Path(namespace) / date_part / subdir / f"{stem}{ext}"
+
+    media_dir = Path(cfg.media_dir or "media")
+    public_media_dir = Path(cfg.public_media_dir or cfg.media_dir or "media")
+    save_path = media_dir / rel_path
+    public_path = public_media_dir / rel_path
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    save_path.write_bytes(data)
+
+    return {
+        "ok": True,
+        "path": str(public_path),
+        "internal_path": str(save_path),
+        "mime_type": resolved_mime_type,
+        "size_bytes": len(data),
+    }
+
+
+
+def _extract_asset_blob(asset: dict[str, Any]) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    if not isinstance(asset, dict):
+        return None, None, None, None, None
+
+    file_name = None
+    for key in ("file_name", "filename", "original_filename", "original_file_name"):
+        value = asset.get(key)
+        if isinstance(value, str) and value.strip():
+            file_name = value
+            break
+
+    mime_type = None
+    for key in ("mime_type", "mimetype", "content_type", "content_type_hint"):
+        value = asset.get(key)
+        if isinstance(value, str) and value.strip():
+            mime_type = value
+            break
+
+    has_metadata = file_name is not None or mime_type is not None
+    for key in ("base64", "base64_data", "content_base64", "file_base64", "raw_base64", "blob", "data"):
+        value = asset.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        is_data_uri = BASE64_DATA_URI_RE.match(value) is not None
+        explicit_base64_key = "base64" in key
+        if key == "data" and not (has_metadata or is_data_uri or looks_like_base64_blob(value)):
+            continue
+        if key != "data" and not (has_metadata or explicit_base64_key or is_data_uri or looks_like_base64_blob(value)):
+            continue
+        return key, value, file_name, mime_type, safe_path_component(asset.get("name") or asset.get("title") or asset.get("id") or key)
+
+    return None, None, file_name, mime_type, None
+
+
+
+def persist_asset_dict(cfg: Config, asset: dict[str, Any], request_id: str, *, namespace: str, path_hint: str) -> dict[str, Any]:
+    result_asset = copy.deepcopy(asset)
+    blob_key, raw_base64, file_name, mime_type, asset_hint = _extract_asset_blob(result_asset)
+    if blob_key is None or raw_base64 is None:
+        return result_asset
+
+    persisted = persist_base64_media(
+        cfg,
+        raw_base64,
+        mime_type=mime_type,
+        file_name=file_name,
+        id_hint=result_asset.get("id") or result_asset.get("name") or request_id or asset_hint,
+        path_hint=path_hint,
+        namespace=namespace,
+    )
+
+    result_asset.pop(blob_key, None)
+    if persisted.get("ok"):
+        path = str(persisted["path"])
+        result_asset["file_path"] = path
+        result_asset["saved_path"] = path
+        result_asset["internal_path"] = persisted.get("internal_path")
+        result_asset["size_bytes"] = persisted.get("size_bytes")
+        result_asset["mime_type"] = persisted.get("mime_type") or mime_type or result_asset.get("mime_type")
+        result_asset["base64_saved"] = True
+    else:
+        result_asset["base64_error"] = str(persisted.get("error") or "base64_decode_failed")
+        result_asset["base64_saved"] = False
+
+    return result_asset
+
+
+
+def persist_payload_base64_assets(cfg: Config, payload: Any, request_id: str, *, namespace: str, path_parts: tuple[str, ...] = ()) -> Any:
+    if isinstance(payload, dict):
+        if _extract_asset_blob(payload)[0] is not None:
+            return persist_asset_dict(cfg, payload, request_id, namespace=namespace, path_hint=".".join(path_parts) or "payload")
+        return {
+            str(key): persist_payload_base64_assets(
+                cfg,
+                value,
+                request_id,
+                namespace=namespace,
+                path_parts=path_parts + (str(key),),
+            )
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [
+            persist_payload_base64_assets(cfg, item, request_id, namespace=namespace, path_parts=path_parts + (str(index),))
+            for index, item in enumerate(payload)
+        ]
+    return payload
+
+
+
+def persist_incoming_base64_assets(cfg: Config, payload: Any, request_id: str) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+
+    namespace = str(payload.get("schema") or payload.get("event") or payload.get("type") or "webhook_media").replace(".", "_")
+    persisted = persist_payload_base64_assets(cfg, payload, request_id, namespace=namespace)
+
+    # Backward-compatible aliases used by existing upload-cover templates.
+    if isinstance(persisted, dict):
+        cover = persisted.get("cover")
+        if isinstance(cover, dict) and isinstance(cover.get("file_path"), str) and cover.get("file_path"):
+            persisted["cover_file"] = cover["file_path"]
+            persisted["cover_path"] = cover["file_path"]
+            if cover.get("mime_type"):
+                persisted["cover_mime_type"] = cover.get("mime_type")
+    return persisted
+
+
+
+def looks_like_base64_blob(value: str) -> bool:
+    text = value.strip()
+    if text.startswith("base64://") or BASE64_DATA_URI_RE.match(text):
+        return True
+    if len(text) < 512:
+        return False
+    compact = re.sub(r"\s+", "", text)
+    return len(compact) >= 512 and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", compact) is not None
+
+
+
+def sanitize_payload_for_log(value: Any, key: str | None = None) -> Any:
+    if isinstance(value, str):
+        key_name = (key or "").strip().lower()
+        if key_name in BASE64_FIELD_NAMES or looks_like_base64_blob(value):
+            return f"<base64 omitted:{len(value)} chars>"
+        return value
+    if isinstance(value, list):
+        return [sanitize_payload_for_log(item, key=key) for item in value]
+    if isinstance(value, dict):
+        return {str(k): sanitize_payload_for_log(v, key=str(k)) for k, v in value.items()}
+    return value
 
 
 
@@ -710,14 +994,20 @@ class PartialFormatDict(dict[str, Any]):
 def partial_format_template(template: str, values: dict[str, Any] | None) -> str:
     if not isinstance(values, dict):
         return template
-    flattened = {
-        k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v)
-        for k, v in values.items()
-    }
-    try:
-        return template.format_map(PartialFormatDict(flattened))
-    except Exception:  # noqa: BLE001
-        return template
+
+    def stringify(value: Any) -> str:
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        value = get_field_value(values, key) if "." in key else values.get(key)
+        if value is None or value == "":
+            return "{" + key + "}"
+        return stringify(value)
+
+    return re.sub(r"\{([A-Za-z_][A-Za-z0-9_.-]*)\}", replace, template)
 
 
 
@@ -977,6 +1267,7 @@ def evaluate_secret(cfg: Config, handler: BaseHTTPRequestHandler) -> dict[str, A
 
 def build_request_record(handler: BaseHTTPRequestHandler, cfg: Config, request_id: str, parsed: urllib.parse.ParseResult, payload: Any, auth: dict[str, Any], outcome: str, note: str | None = None) -> dict[str, Any]:
     query_keys = sorted(set(urllib.parse.parse_qs(parsed.query).keys()))
+    log_payload = sanitize_payload_for_log(payload)
     return {
         "ts": now_iso(),
         "request_id": request_id,
@@ -992,8 +1283,8 @@ def build_request_record(handler: BaseHTTPRequestHandler, cfg: Config, request_i
             "content_type": handler.headers.get("Content-Type", ""),
             "content_length": int(handler.headers.get("Content-Length", "0") or "0"),
             "headers": get_sanitized_headers(handler),
-            "payload": payload,
-            "payload_summary": get_payload_summary(payload),
+            "payload": log_payload,
+            "payload_summary": get_payload_summary(log_payload),
         },
         "auth": auth,
         "target": {"private": cfg.private, "group": cfg.group},
@@ -2125,7 +2416,10 @@ def is_recording_segment_start_bucket(bucket: AggregateBucket) -> bool:
 
 def get_recent_end_suppress_window_ms(cfg: Config) -> int:
     base_window = max(0, int(cfg.notify_debounce_ms or 0))
-    return max(120_000, base_window * 8)
+    # Keep the recent end lifecycle around long enough to suppress recorder tail
+    # jitter.  In particular, a StreamStarted emitted within 5 minutes after a
+    # forwarded true end is considered post-end noise and is suppressed directly.
+    return max(300_000, base_window * 20)
 
 
 
@@ -2409,6 +2703,15 @@ def should_suppress_recent_forwarded_end_candidate(
     return is_recent_tail_candidate_bucket(candidate_bucket)
 
 
+def should_suppress_start_after_recent_forwarded_end(recent_end: RecentForwardedEnd, candidate_bucket: AggregateBucket) -> bool:
+    # User-facing policy: once a true 下播 notification has been forwarded, any
+    # start-shaped StreamStarted for the same room/name/title while that recent-end
+    # lifecycle is still remembered is recorder tail jitter, not a real user-visible
+    # 开播.  The recent-end memory currently lasts at least 5 minutes.
+    _ = recent_end
+    return is_true_bililive_start_bucket(candidate_bucket)
+
+
 
 def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info: dict[str, Any] | None = None) -> None:
     message, aggregate_meta = build_aggregate_message(bucket)
@@ -2635,7 +2938,32 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
             return True
 
         recent_end = get_recent_forwarded_end(notify_key)
-        if recent_end is not None and hold_start_after_recent_end(cfg, notify_key, bucket, preview_text):
+        if recent_end is not None and should_suppress_start_after_recent_forwarded_end(recent_end, bucket):
+            candidate_score = build_start_bucket_score(bucket)
+            message_record["forward_text"] = preview_text
+            message_record["outcome"] = "suppressed"
+            message_record["debounce"] = {
+                "mode": "recent_forwarded_end_window",
+                "status": "suppressed_start_within_5m_after_recent_end",
+                "key": notify_key,
+                "recent_window_ms": get_recent_end_suppress_window_ms(cfg),
+                "candidate_score": list(candidate_score),
+                "kept_end_score": list(recent_end.score),
+                "remaining_ms": int((recent_end.expires_at - time.time()) * 1000),
+            }
+            append_message_log(cfg, message_record)
+            eprint(
+                json.dumps(
+                    {
+                        "event": "aggregate_recent_end_suppressed_start",
+                        "group_key": bucket.key,
+                        "group_name": bucket.group_name,
+                        "request_ids": bucket.request_ids,
+                        "debounce": message_record["debounce"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
             return True
 
         clear_recent_forwarded_end(notify_key)
@@ -3022,6 +3350,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._send_json(401, {"ok": False, "error": "invalid secret", "request_id": request_id})
             return
 
+        payload = persist_incoming_base64_assets(self.cfg, payload, request_id)
+
         request_record = build_request_record(
             self,
             self.cfg,
@@ -3138,6 +3468,8 @@ def parse_args() -> Config:
     ap.add_argument("--include-headers", action="store_true", default=os.getenv("INCLUDE_HEADERS", "1") not in {"0", "false", "False"})
     ap.add_argument("--rules-path", default=os.getenv("WEBHOOK_RULES_PATH", "/app/rules.json"), help="规则文件路径（JSON）；用于按配置决定不同 webhook 的转发内容")
     ap.add_argument("--log-dir", default=os.getenv("WEBHOOK_LOG_DIR", "/logs"), help="消息日志目录；按 requests/messages/errors 三层写入 JSONL")
+    ap.add_argument("--media-dir", default=os.getenv("WEBHOOK_MEDIA_DIR", "/app/media"), help="收到的 base64 媒体文件落盘目录（服务容器/进程可写路径）")
+    ap.add_argument("--public-media-dir", default=os.getenv("WEBHOOK_PUBLIC_MEDIA_DIR", "/opt/WebhookToNapcat/media"), help="写入 payload/log 并传给 NapCat 的媒体文件路径前缀；通常是宿主机可见路径")
     ap.add_argument("--aggregate-window-ms", type=int, default=int(os.getenv("WEBHOOK_AGGREGATE_WINDOW_MS", "3000")), help="BililiveRecorder 事件聚合窗口（毫秒）；开始/结束类事件会在窗口内合并后统一发送")
     ap.add_argument("--notify-file-opening", action="store_true", default=os.getenv("WEBHOOK_NOTIFY_FILE_OPENING", "0") in {"1", "true", "True"}, help="是否单独发送 FileOpening 类事件；默认关闭，仅参与聚合")
     ap.add_argument("--notify-debounce-ms", type=int, default=int(os.getenv("WEBHOOK_NOTIFY_DEBOUNCE_MS", "15000")), help="聚合消息结束阶段等待窗口（毫秒）；窗口内会缓存 StreamEnded 与候选结束统计，优先保留信息更完整的那条最终下发，并抑制尾声抖动 start / 空尾巴")
@@ -3172,6 +3504,8 @@ def parse_args() -> Config:
         aggregate_window_ms=max(0, args.aggregate_window_ms),
         notify_file_opening=args.notify_file_opening,
         notify_debounce_ms=max(0, args.notify_debounce_ms),
+        media_dir=args.media_dir,
+        public_media_dir=args.public_media_dir,
     )
 
 
