@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+import hashlib
 import json
 import os
 import re
@@ -187,6 +188,7 @@ def append_jsonl(cfg: Config, bucket: str, record: dict[str, Any]) -> None:
         return
 
     try:
+        record = sanitize_payload_for_log(record)
         log_dir = Path(cfg.log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
         month = datetime.now().strftime("%Y-%m")
@@ -359,6 +361,7 @@ def persist_base64_media(
         "internal_path": str(save_path),
         "mime_type": resolved_mime_type,
         "size_bytes": len(data),
+        "base64_uri": "base64://" + base64.b64encode(data).decode("ascii"),
     }
 
 
@@ -420,6 +423,8 @@ def persist_asset_dict(cfg: Config, asset: dict[str, Any], request_id: str, *, n
         result_asset["file_path"] = path
         result_asset["saved_path"] = path
         result_asset["internal_path"] = persisted.get("internal_path")
+        if persisted.get("base64_uri"):
+            result_asset["base64_uri"] = persisted.get("base64_uri")
         result_asset["size_bytes"] = persisted.get("size_bytes")
         result_asset["mime_type"] = persisted.get("mime_type") or mime_type or result_asset.get("mime_type")
         result_asset["base64_saved"] = True
@@ -467,6 +472,8 @@ def persist_incoming_base64_assets(cfg: Config, payload: Any, request_id: str) -
         if isinstance(cover, dict) and isinstance(cover.get("file_path"), str) and cover.get("file_path"):
             persisted["cover_file"] = cover["file_path"]
             persisted["cover_path"] = cover["file_path"]
+            if isinstance(cover.get("base64_uri"), str) and cover.get("base64_uri"):
+                persisted["cover_base64"] = cover["base64_uri"]
             if cover.get("mime_type"):
                 persisted["cover_mime_type"] = cover.get("mime_type")
     return persisted
@@ -484,11 +491,37 @@ def looks_like_base64_blob(value: str) -> bool:
 
 
 
+def summarize_base64_for_log(value: str, key: str | None = None) -> dict[str, Any]:
+    data, uri_mime_type = decode_base64_media(value)
+    compact = value.strip()
+    if BASE64_DATA_URI_RE.match(compact):
+        match = BASE64_DATA_URI_RE.match(compact)
+        compact = match.group("data").strip() if match else compact
+    elif compact.startswith("base64://"):
+        compact = compact[len("base64://") :].strip()
+    compact = re.sub(r"\s+", "", compact)
+
+    summary: dict[str, Any] = {
+        "base64_omitted": True,
+        "chars": len(value),
+        "data_chars": len(compact),
+    }
+    if key:
+        summary["field"] = key
+    if uri_mime_type:
+        summary["mime_type"] = uri_mime_type
+    if data is not None:
+        summary["decoded_bytes"] = len(data)
+        summary["sha256"] = hashlib.sha256(data).hexdigest()
+    return summary
+
+
+
 def sanitize_payload_for_log(value: Any, key: str | None = None) -> Any:
     if isinstance(value, str):
         key_name = (key or "").strip().lower()
         if key_name in BASE64_FIELD_NAMES or looks_like_base64_blob(value):
-            return f"<base64 omitted:{len(value)} chars>"
+            return summarize_base64_for_log(value, key=key_name or None)
         return value
     if isinstance(value, list):
         return [sanitize_payload_for_log(item, key=key) for item in value]
@@ -720,6 +753,59 @@ def get_rendered_message_preview(message: dict[str, Any] | None) -> str | None:
             if isinstance(text, str) and text.strip():
                 parts.append(text.strip())
     return "\n".join(parts).strip() or None
+
+
+
+def summarize_segment_for_log(segment: Any) -> dict[str, Any] | None:
+    if not isinstance(segment, dict):
+        return None
+    segment_type = str(segment.get("type") or "").strip().lower()
+    data = segment.get("data") if isinstance(segment.get("data"), dict) else {}
+    if segment_type == "text":
+        text = data.get("text") if isinstance(data, dict) else None
+        return {
+            "type": "text",
+            "chars": len(text) if isinstance(text, str) else 0,
+            "preview": truncate_value(text.strip(), max_len=120) if isinstance(text, str) and text.strip() else "",
+        }
+    if segment_type == "image":
+        file_value = data.get("file") if isinstance(data, dict) else None
+        summary: dict[str, Any] = {"type": "image"}
+        if isinstance(file_value, str) and looks_like_base64_blob(file_value):
+            summary["file_kind"] = "base64"
+            summary["file"] = summarize_base64_for_log(file_value, key="file")
+        elif isinstance(file_value, str):
+            summary["file_kind"] = "reference"
+            summary["file"] = truncate_value(file_value, max_len=240)
+        else:
+            summary["file_kind"] = "missing"
+        for option in ("proxy", "cache", "timeout"):
+            if isinstance(data, dict) and option in data:
+                summary[option] = data[option]
+        return summary
+    return {"type": segment_type or "unknown"}
+
+
+
+def summarize_message_for_log(message: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(message, dict):
+        return None
+    mode = str(message.get("mode") or "text")
+    summary: dict[str, Any] = {"mode": mode}
+    if mode == "text":
+        text = message.get("text")
+        summary["text_chars"] = len(text) if isinstance(text, str) else 0
+        summary["text_preview"] = truncate_value(text.strip(), max_len=160) if isinstance(text, str) and text.strip() else ""
+        return summary
+
+    segments = message.get("segments") if isinstance(message.get("segments"), list) else []
+    summary["segments_count"] = len(segments)
+    summary["segments"] = [item for item in (summarize_segment_for_log(segment) for segment in segments) if item is not None]
+    fallback_text = message.get("fallback_text")
+    if isinstance(fallback_text, str) and fallback_text.strip():
+        summary["fallback_text_chars"] = len(fallback_text)
+        summary["fallback_text_preview"] = truncate_value(fallback_text.strip(), max_len=160)
+    return summary
 
 
 
@@ -1791,8 +1877,8 @@ def truncate_value(value: Any, max_len: int) -> Any:
 
 def sanitize_log_value(value: Any, max_len: int = 240) -> Any:
     if isinstance(value, str):
-        if value.startswith("base64://"):
-            return f"<base64:{max(0, len(value) - len('base64://'))} chars>"
+        if looks_like_base64_blob(value):
+            return summarize_base64_for_log(value)
         return truncate_value(value, max_len=max_len)
     if isinstance(value, list):
         return [sanitize_log_value(item, max_len=max_len) for item in value]
@@ -2527,6 +2613,7 @@ def hold_start_after_recent_end(cfg: Config, notify_key: str, bucket: AggregateB
     message_record["forward_text"] = preview_text
     if message:
         message_record["message_mode"] = message.get("mode")
+        message_record["message_summary"] = summarize_message_for_log(message)
     message_record["outcome"] = "held"
     message_record["debounce"] = {
         "mode": "post_end_start_confirm_window",
@@ -2643,6 +2730,7 @@ def suppress_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_inf
     if message:
         message_record["forward_text"] = get_rendered_message_preview(message) or "(rich media message)"
         message_record["message_mode"] = message.get("mode")
+        message_record["message_summary"] = summarize_message_for_log(message)
     message_record["outcome"] = "suppressed"
     if debounce_info:
         message_record["debounce"] = debounce_info
@@ -2730,6 +2818,7 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info
     preview_text = get_rendered_message_preview(message) or "(rich media message)"
     message_record["forward_text"] = preview_text
     message_record["message_mode"] = message.get("mode")
+    message_record["message_summary"] = summarize_message_for_log(message)
     if debounce_info:
         message_record["debounce"] = debounce_info
 
@@ -3386,6 +3475,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             "payload_summary": request_record["request"]["payload_summary"],
             "forward_text": preview_text,
             "message_mode": message.get("mode"),
+            "message_summary": summarize_message_for_log(message),
             "target": targets,
         }
 
