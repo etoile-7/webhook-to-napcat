@@ -6,11 +6,13 @@ from pathlib import Path
 from webhook_to_napcat.server import (
     Config,
     append_message_log,
+    build_rendered_text_message,
     persist_incoming_base64_assets,
     render_rule_output,
     render_template_text,
     sanitize_payload_for_log,
     summarize_message_for_log,
+    summarize_payload,
 )
 
 
@@ -166,6 +168,22 @@ class TemplateRenderTest(unittest.TestCase):
         self.assertEqual(summary["segments"][1]["file_kind"], "base64")
         self.assertTrue(summary["segments"][1]["file"]["base64_omitted"])
         self.assertNotIn(png_base64, json.dumps(summary, ensure_ascii=False))
+
+
+    def test_summary_output_redacts_base64_aliases_before_rendering(self) -> None:
+        raw_base64 = "A" * 600
+        text = summarize_payload({"status": "finalized", "cover_base64": "base64://" + raw_base64})
+        self.assertIn("status: finalized", text)
+        self.assertIn("base64_omitted", text)
+        self.assertNotIn(raw_base64, text)
+
+    def test_rendered_text_is_truncated_to_outbound_limit(self) -> None:
+        message = build_rendered_text_message("x" * 6000)
+        self.assertIsNotNone(message)
+        text = message["text"]
+        self.assertLessEqual(len(text), 5000)
+        self.assertIn("message truncated", text)
+        self.assertIn("original_chars=6000", text)
 
     def test_append_message_log_redacts_base64_as_last_line_of_defense(self) -> None:
         png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5X2x8AAAAASUVORK5CYII="

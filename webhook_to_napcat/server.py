@@ -38,6 +38,7 @@ RECENT_FORWARDED_ENDS: dict[str, "RecentForwardedEnd"] = {}
 LIVE_SESSION_SEGMENT_LOCK = threading.Lock()
 LIVE_SESSION_SEGMENTS: dict[str, "LiveSessionSegmentAccumulator"] = {}
 BILILIVE_SESSION_STATS_COMPUTED_KEY = "__bililive_live_session_merged_stats"
+DEFAULT_OUTBOUND_TEXT_MAX_CHARS = 5000
 PRICE_TABLE_CACHE: dict[str, dict[str, float]] = {}
 BILIBILI_ROOM_INFO_CACHE: dict[str, dict[str, Any]] = {}
 BASE64_DATA_URI_RE = re.compile(r"^data:(?P<mime>[^;]+);base64,(?P<data>.*)$", re.S)
@@ -678,8 +679,28 @@ def build_napcat_request(cfg: Config, target: dict[str, int]) -> tuple[str, dict
 
 
 
+def get_outbound_text_max_chars() -> int:
+    configured = safe_int(os.getenv("WEBHOOK_OUTBOUND_TEXT_MAX_CHARS"))
+    if configured is None:
+        return DEFAULT_OUTBOUND_TEXT_MAX_CHARS
+    return max(0, configured)
+
+
+def truncate_outbound_text(text: str | None, max_chars: int | None = None) -> str | None:
+    if not isinstance(text, str):
+        return text
+    max_chars = get_outbound_text_max_chars() if max_chars is None else max(0, max_chars)
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+
+    suffix = f"\n\n[message truncated: original_chars={len(text)}, limit={max_chars}]"
+    if len(suffix) >= max_chars:
+        return suffix[:max_chars]
+    return text[: max_chars - len(suffix)].rstrip() + suffix
+
+
 def split_for_qq(text: str, max_len: int) -> list[str]:
-    text = (text or "").strip()
+    text = truncate_outbound_text((text or "").strip()) or ""
     if not text:
         return ["(empty)"]
     if len(text) <= max_len:
@@ -888,6 +909,7 @@ def parse_body(content_type: str, raw: bytes) -> Any:
 
 
 def summarize_payload(payload: Any) -> str:
+    payload = sanitize_payload_for_log(payload)
     if isinstance(payload, dict):
         preferred_keys = [
             "title",
@@ -1126,7 +1148,7 @@ def render_template_text(template: Any, payload: Any) -> str | None:
 def build_rendered_text_message(text: str | None) -> dict[str, Any] | None:
     if not isinstance(text, str) or not text.strip():
         return None
-    return {"mode": "text", "text": text.strip()}
+    return {"mode": "text", "text": truncate_outbound_text(text.strip())}
 
 
 
@@ -1178,7 +1200,7 @@ def render_message_segment(spec: Any, payload: Any) -> dict[str, Any] | None:
         text = render_template_text(spec.get("text") or spec.get("template"), payload)
         if not text:
             return None
-        return {"type": "text", "data": {"text": text}}
+        return {"type": "text", "data": {"text": truncate_outbound_text(text)}}
 
     if segment_type == "image":
         file_value = render_template_text(spec.get("file"), payload)
@@ -1209,9 +1231,9 @@ def render_rule_output(rule: dict[str, Any], payload: Any) -> dict[str, Any] | N
         field = str(output.get("field", "")).strip()
         value = get_field_value(payload, field) if field else None
         if isinstance(value, str) and value.strip():
-            return {"mode": "text", "text": value.strip()}
+            return build_rendered_text_message(value.strip())
         if value is not None:
-            return {"mode": "text", "text": str(value)}
+            return build_rendered_text_message(str(value))
         return None
 
     if kind == "template":
@@ -1238,7 +1260,7 @@ def render_rule_output(rule: dict[str, Any], payload: Any) -> dict[str, Any] | N
         return {
             "mode": "segments",
             "segments": segments,
-            "fallback_text": fallback_text.strip() if isinstance(fallback_text, str) and fallback_text.strip() else None,
+            "fallback_text": truncate_outbound_text(fallback_text.strip()) if isinstance(fallback_text, str) and fallback_text.strip() else None,
         }
 
     return None
@@ -1303,7 +1325,7 @@ def build_forward_message(cfg: Config, handler: BaseHTTPRequestHandler, payload:
             lines.append(f"UA: {ua}")
     lines.append("")
     lines.append(summarize_payload(payload))
-    return {"mode": "text", "text": "\n".join(lines).strip()}, default_target_specs(cfg)
+    return build_rendered_text_message("\n".join(lines).strip()) or {"mode": "text", "text": "(empty)"}, default_target_specs(cfg)
 
 
 
