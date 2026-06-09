@@ -35,6 +35,9 @@ RECENT_START_LOCK = threading.Lock()
 RECENT_FORWARDED_STARTS: dict[str, "RecentForwardedStart"] = {}
 RECENT_END_LOCK = threading.Lock()
 RECENT_FORWARDED_ENDS: dict[str, "RecentForwardedEnd"] = {}
+LIVE_SESSION_SEGMENT_LOCK = threading.Lock()
+LIVE_SESSION_SEGMENTS: dict[str, "LiveSessionSegmentAccumulator"] = {}
+BILILIVE_SESSION_STATS_COMPUTED_KEY = "__bililive_live_session_merged_stats"
 PRICE_TABLE_CACHE: dict[str, dict[str, float]] = {}
 BILIBILI_ROOM_INFO_CACHE: dict[str, dict[str, Any]] = {}
 BASE64_DATA_URI_RE = re.compile(r"^data:(?P<mime>[^;]+);base64,(?P<data>.*)$", re.S)
@@ -171,6 +174,13 @@ class RecentForwardedEnd:
     key: str
     score: tuple[int, int, int, int, int, int, int]
     expires_at: float
+
+
+@dataclass
+class LiveSessionSegmentAccumulator:
+    key: str
+    expires_at: float
+    segments: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def eprint(*args: Any) -> None:
@@ -1582,6 +1592,8 @@ def compute_xml_live_stats(xml_path: Path, price_table_path: str | None = None, 
         "guard_increment_line_block": "",
         "gift_total_label": "礼物营收",
         "total_revenue_label": "总营收",
+        "_interaction_user_keys": [],
+        "_gift_unknown_counts": {},
     }
     if not xml_path.exists():
         return stats
@@ -1695,6 +1707,8 @@ def compute_xml_live_stats(xml_path: Path, price_table_path: str | None = None, 
             "gift_unknown_line": f"\n未知礼物：{gift_unknown_summary}" if gift_unknown_summary else "",
             "gift_total_label": "礼物营收（已知）" if gift_unknown_summary else "礼物营收",
             "total_revenue_label": "总营收（已知）" if gift_unknown_summary else "总营收",
+            "_interaction_user_keys": sorted(interaction_users),
+            "_gift_unknown_counts": dict(sorted(gift_unknown.items())),
         }
     )
     return stats
@@ -1702,6 +1716,10 @@ def compute_xml_live_stats(xml_path: Path, price_table_path: str | None = None, 
 
 
 def get_xml_live_stats(bucket: AggregateBucket, spec: dict[str, Any]) -> dict[str, Any]:
+    merged_session_stats = bucket.computed.get(BILILIVE_SESSION_STATS_COMPUTED_KEY)
+    if isinstance(merged_session_stats, dict) and isinstance(merged_session_stats.get("xml_live_stats"), dict):
+        return merged_session_stats["xml_live_stats"]
+
     relative_path_field = str(spec.get("relative_path_field") or "EventData.RelativePath")
     base_dir = str(spec.get("base_dir") or "").strip()
     price_table_path = str(spec.get("gift_prices_markdown_path") or "").strip() or None
@@ -2056,6 +2074,26 @@ def build_aggregate_context(bucket: AggregateBucket) -> dict[str, Any]:
         }
     )
 
+    merged_session_stats = bucket.computed.get(BILILIVE_SESSION_STATS_COMPUTED_KEY)
+    if isinstance(merged_session_stats, dict):
+        merged_duration = safe_float(merged_session_stats.get("duration_seconds"))
+        merged_file_size = safe_int(merged_session_stats.get("file_size_bytes"))
+        if merged_duration is not None:
+            ctx["duration_seconds"] = merged_duration
+            ctx["duration"] = format_duration_human(merged_duration)
+        if merged_file_size is not None:
+            ctx["file_size_bytes"] = merged_file_size
+            ctx["file_size"] = format_bytes_human(merged_file_size)
+        for key in (
+            "recording_segment_count",
+            "recording_segment_paths",
+            "recording_segment_names",
+            "recording_segment_request_ids",
+            "recording_segment_scope",
+        ):
+            if key in merged_session_stats:
+                ctx[key] = merged_session_stats[key]
+
     context_spec = bucket.group_config.get("context")
     if isinstance(context_spec, dict):
         for alias, spec in context_spec.items():
@@ -2298,6 +2336,219 @@ def get_xml_metrics_for_bucket(bucket: AggregateBucket) -> dict[str, Any]:
                 return get_xml_live_stats(bucket, spec)
     return {}
 
+
+
+def get_event_payload(bucket: AggregateBucket, event_type: str) -> dict[str, Any] | None:
+    event = bucket.events.get(event_type)
+    payload = event.get("payload") if isinstance(event, dict) else None
+    return payload if isinstance(payload, dict) else None
+
+
+def get_live_session_segment_ttl_ms(cfg: Config) -> int:
+    configured = safe_int(os.getenv("WEBHOOK_LIVE_SESSION_SEGMENT_TTL_MS"))
+    if configured is not None:
+        return max(0, configured)
+    return 18 * 60 * 60 * 1000
+
+
+def cleanup_expired_live_session_segments(now_ts: float | None = None) -> None:
+    now_ts = time.time() if now_ts is None else now_ts
+    with LIVE_SESSION_SEGMENT_LOCK:
+        for key in [key for key, acc in LIVE_SESSION_SEGMENTS.items() if acc.expires_at <= now_ts]:
+            LIVE_SESSION_SEGMENTS.pop(key, None)
+
+
+def build_live_session_segment_record(bucket: AggregateBucket) -> dict[str, Any] | None:
+    payload = get_event_payload(bucket, "FileClosed")
+    if not isinstance(payload, dict):
+        return None
+
+    relative_path = get_field_value(payload, "EventData.RelativePath")
+    duration_seconds = safe_float(get_field_value(payload, "EventData.Duration"))
+    file_size_bytes = safe_int(get_field_value(payload, "EventData.FileSize"))
+    if relative_path in {None, ""} and duration_seconds is None and file_size_bytes is None:
+        return None
+
+    segment_id = str(relative_path or "").strip()
+    if not segment_id:
+        event = bucket.events.get("FileClosed") if isinstance(bucket.events.get("FileClosed"), dict) else {}
+        segment_id = str(event.get("request_id") or (bucket.request_ids[-1] if bucket.request_ids else uuid4().hex))
+
+    xml_stats = get_xml_metrics_for_bucket(bucket)
+    return {
+        "segment_id": segment_id,
+        "relative_path": str(relative_path or ""),
+        "file_name": get_file_name(relative_path),
+        "duration_seconds": duration_seconds,
+        "file_size_bytes": file_size_bytes,
+        "xml_live_stats": copy.deepcopy(xml_stats) if isinstance(xml_stats, dict) else {},
+        "request_ids": list(bucket.request_ids),
+        "created_at": time.time(),
+    }
+
+
+def merge_xml_live_stats_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    xml_paths: list[str] = []
+    interaction_users: set[str] = set()
+    gift_unknown: dict[str, int] = {}
+    bullet_count = 0
+    sc_count = 0
+    guard_count = 0
+    captain_count = 0
+    commander_count = 0
+    governor_count = 0
+    gift_total = 0.0
+    sc_total = 0.0
+    guard_total = 0.0
+    xml_exists = False
+
+    for record in records:
+        stats = record.get("xml_live_stats") if isinstance(record.get("xml_live_stats"), dict) else {}
+        if not isinstance(stats, dict):
+            continue
+        xml_exists = xml_exists or bool(stats.get("xml_exists"))
+        xml_path = stats.get("xml_path")
+        if isinstance(xml_path, str) and xml_path and xml_path not in xml_paths:
+            xml_paths.append(xml_path)
+        bullet_count += safe_int(stats.get("bullet_count_value")) or 0
+        sc_count += safe_int(stats.get("sc_count_value")) or 0
+        guard_count += safe_int(stats.get("guard_count_value")) or 0
+        captain_count += safe_int(stats.get("captain_count")) or 0
+        commander_count += safe_int(stats.get("commander_count")) or 0
+        governor_count += safe_int(stats.get("governor_count")) or 0
+        gift_total += safe_float(stats.get("gift_total_value")) or 0.0
+        sc_total += safe_float(stats.get("sc_total_value")) or 0.0
+        guard_total += safe_float(stats.get("guard_total_value")) or 0.0
+
+        raw_users = stats.get("_interaction_user_keys")
+        if isinstance(raw_users, list):
+            interaction_users.update(str(item) for item in raw_users if str(item).strip())
+        else:
+            fallback_count = safe_int(stats.get("interaction_count_value")) or 0
+            for index in range(fallback_count):
+                interaction_users.add(f"segment:{record.get('segment_id')}:{index}")
+
+        raw_unknown = stats.get("_gift_unknown_counts")
+        if isinstance(raw_unknown, dict):
+            for name, count in raw_unknown.items():
+                name_text = str(name or "").strip()
+                if not name_text:
+                    continue
+                gift_unknown[name_text] = gift_unknown.get(name_text, 0) + (safe_int(count) or 0)
+
+    interaction_count = len(interaction_users)
+    total_revenue = gift_total + sc_total + guard_total
+    gift_unknown_summary = "、".join(f"{name}×{count}" for name, count in sorted(gift_unknown.items()) if name and count)
+    guard_increment_line = build_guard_increment_line(captain_count, commander_count, governor_count)
+
+    return {
+        "xml_path": " | ".join(xml_paths),
+        "xml_paths": xml_paths,
+        "xml_exists": xml_exists,
+        "bullet_count": str(bullet_count),
+        "bullet_count_value": bullet_count,
+        "bullet_count_display": format_count_k(bullet_count),
+        "interaction_count": str(interaction_count),
+        "interaction_count_value": interaction_count,
+        "interaction_count_display": format_count_k(interaction_count),
+        "sc_count": str(sc_count),
+        "sc_count_value": sc_count,
+        "sc_total": format_money(sc_total),
+        "sc_total_value": sc_total,
+        "captain_count": str(captain_count),
+        "commander_count": str(commander_count),
+        "governor_count": str(governor_count),
+        "guard_count": str(guard_count),
+        "guard_count_value": guard_count,
+        "guard_increment_line": guard_increment_line,
+        "guard_increment_line_block": f"\n{guard_increment_line}" if guard_increment_line else "",
+        "guard_total": format_money(guard_total),
+        "guard_total_value": guard_total,
+        "gift_total": format_money(gift_total),
+        "gift_total_value": gift_total,
+        "total_revenue": format_money(total_revenue),
+        "total_revenue_value": total_revenue,
+        "gift_unknown_count": len(gift_unknown),
+        "gift_unknown_summary": gift_unknown_summary,
+        "gift_unknown_line": f"\n未知礼物：{gift_unknown_summary}" if gift_unknown_summary else "",
+        "gift_total_label": "礼物营收（已知）" if gift_unknown_summary else "礼物营收",
+        "total_revenue_label": "总营收（已知）" if gift_unknown_summary else "总营收",
+        "_interaction_user_keys": sorted(interaction_users),
+        "_gift_unknown_counts": dict(sorted(gift_unknown.items())),
+    }
+
+
+def remember_live_session_segment(cfg: Config, notify_key: str | None, bucket: AggregateBucket) -> bool:
+    if not notify_key:
+        return False
+    record = build_live_session_segment_record(bucket)
+    if record is None:
+        return False
+
+    ttl_ms = get_live_session_segment_ttl_ms(cfg)
+    now_ts = time.time()
+    cleanup_expired_live_session_segments(now_ts)
+    with LIVE_SESSION_SEGMENT_LOCK:
+        acc = LIVE_SESSION_SEGMENTS.get(notify_key)
+        if acc is None or acc.expires_at <= now_ts:
+            acc = LiveSessionSegmentAccumulator(key=notify_key, expires_at=now_ts + ttl_ms / 1000)
+            LIVE_SESSION_SEGMENTS[notify_key] = acc
+        else:
+            acc.expires_at = max(acc.expires_at, now_ts + ttl_ms / 1000)
+        acc.segments[str(record["segment_id"])] = record
+    return True
+
+
+def clear_live_session_segments(notify_key: str | None) -> None:
+    if not notify_key:
+        return
+    with LIVE_SESSION_SEGMENT_LOCK:
+        LIVE_SESSION_SEGMENTS.pop(notify_key, None)
+
+
+def apply_live_session_segments_to_bucket(notify_key: str | None, bucket: AggregateBucket) -> dict[str, Any] | None:
+    if not notify_key or bucket.group_name != "bililive_end":
+        return None
+
+    cleanup_expired_live_session_segments()
+    with LIVE_SESSION_SEGMENT_LOCK:
+        acc = LIVE_SESSION_SEGMENTS.get(notify_key)
+        records_by_id = copy.deepcopy(acc.segments) if acc is not None else {}
+
+    current_record = build_live_session_segment_record(bucket)
+    if current_record is not None:
+        records_by_id[str(current_record["segment_id"])] = current_record
+
+    records = list(records_by_id.values())
+    if not records:
+        return None
+
+    duration_values = [safe_float(record.get("duration_seconds")) for record in records]
+    size_values = [safe_int(record.get("file_size_bytes")) for record in records]
+    duration_total = sum(value for value in duration_values if value is not None)
+    size_total = sum(value for value in size_values if value is not None)
+    paths = [str(record.get("relative_path") or "") for record in records if str(record.get("relative_path") or "").strip()]
+    names = [str(record.get("file_name") or "") for record in records if str(record.get("file_name") or "").strip()]
+    request_ids: list[str] = []
+    for record in records:
+        raw_request_ids = record.get("request_ids")
+        for request_id in raw_request_ids if isinstance(raw_request_ids, list) else []:
+            request_id_text = str(request_id)
+            if request_id_text not in request_ids:
+                request_ids.append(request_id_text)
+
+    merged = {
+        "recording_segment_count": len(records),
+        "recording_segment_paths": " | ".join(paths),
+        "recording_segment_names": " | ".join(names),
+        "recording_segment_request_ids": request_ids,
+        "recording_segment_scope": "live_session" if len(records) > 1 else "single_segment",
+        "duration_seconds": duration_total if any(value is not None for value in duration_values) else None,
+        "file_size_bytes": size_total if any(value is not None for value in size_values) else None,
+        "xml_live_stats": merge_xml_live_stats_records(records),
+    }
+    bucket.computed[BILILIVE_SESSION_STATS_COMPUTED_KEY] = merged
+    return merged
 
 
 def build_end_bucket_metrics(bucket: AggregateBucket) -> dict[str, Any]:
@@ -2676,13 +2927,10 @@ def is_true_bililive_end_bucket(bucket: AggregateBucket) -> bool:
     if "StreamEnded" in event_types:
         return True
 
-    if is_meaningful_streaming_end_candidate(bucket):
-        return True
-
     metrics = build_end_bucket_metrics(bucket)
-    # Only an explicit Streaming=true on a non-meaningful end candidate means this is
-    # probably a recording/session rollover while the live stream is still active.
-    # Missing/unknown Streaming keeps legacy behavior.
+    # Recording split events now happen every few hours while Streaming=true.  They may
+    # contain large/meaningful stats, but they are not user-visible 下播.  Treat only
+    # explicit StreamEnded or a non-streaming end candidate as the real lifecycle end.
     return metrics.get("streaming") is not True
 
 
@@ -2802,6 +3050,10 @@ def should_suppress_start_after_recent_forwarded_end(recent_end: RecentForwarded
 
 
 def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info: dict[str, Any] | None = None) -> None:
+    if bucket.group_name == "bililive_end" and is_true_bililive_end_bucket(bucket):
+        prelim_meta = {"group_name": bucket.group_name, "context": build_aggregate_context(bucket)}
+        apply_live_session_segments_to_bucket(build_bililive_notification_key(prelim_meta), bucket)
+
     message, aggregate_meta = build_aggregate_message(bucket)
     message_record = build_aggregate_message_record(bucket, aggregate_meta)
     targets = resolve_target_specs(cfg, aggregate_meta.get("targets_spec"), context=aggregate_meta.get("context") if isinstance(aggregate_meta.get("context"), dict) else None)
@@ -2844,6 +3096,7 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce_info
         elif bucket.group_name == "bililive_end":
             if is_true_bililive_end_bucket(bucket):
                 clear_recent_forwarded_start(notify_key)
+                clear_live_session_segments(notify_key)
             remember_recent_forwarded_end(cfg, notify_key, bucket)
         eprint(
             json.dumps(
@@ -2909,10 +3162,6 @@ def flush_pending_end_notification(cfg: Config, notify_key: str) -> None:
         "window_ms": max(0, int(cfg.notify_debounce_ms or 0)),
     }
     if is_recording_segment_end_bucket(bucket):
-        if is_meaningful_streaming_end_candidate(bucket):
-            debounce_info["status"] = "expired_forwarded_meaningful_fileclosed"
-            deliver_aggregate_bucket(cfg, bucket, debounce_info=debounce_info)
-            return
         debounce_info["status"] = "suppressed_recording_segment_end_while_streaming"
         suppress_aggregate_bucket(cfg, bucket, debounce_info=debounce_info)
         return
@@ -2936,6 +3185,9 @@ def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
     group_name = str(aggregate_meta.get("group_name") or "").strip()
     event_types = set(aggregate_meta.get("event_types") or [])
     window_ms = max(0, int(cfg.notify_debounce_ms or 0))
+
+    if group_name == "bililive_end" and is_recording_segment_end_bucket(bucket):
+        remember_live_session_segment(cfg, notify_key, bucket)
 
     if not notify_key or window_ms <= 0 or group_name not in {"bililive_start", "bililive_end"}:
         deliver_aggregate_bucket(cfg, bucket)

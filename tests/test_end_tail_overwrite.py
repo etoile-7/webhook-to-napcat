@@ -3,6 +3,8 @@ import unittest
 from webhook_to_napcat.server import (
     AggregateBucket,
     Config,
+    apply_live_session_segments_to_bucket,
+    build_aggregate_context,
     build_end_bucket_metrics,
     build_start_bucket_score,
     cancel_pending_start_after_end,
@@ -14,8 +16,10 @@ from webhook_to_napcat.server import (
     is_recording_segment_start_bucket,
     is_true_bililive_end_bucket,
     is_true_bililive_start_bucket,
+    clear_live_session_segments,
     clear_recent_forwarded_start,
     get_recent_forwarded_start,
+    remember_live_session_segment,
     remember_recent_forwarded_start,
     should_replace_aggregate_bucket_event,
     should_suppress_recent_forwarded_end_candidate,
@@ -353,7 +357,7 @@ class EndTailOverwriteTest(unittest.TestCase):
         clear_recent_forwarded_start(notify_key)
         self.assertIsNone(get_recent_forwarded_start(notify_key))
 
-    def test_meaningful_fileclosed_while_streaming_is_true_end(self) -> None:
+    def test_meaningful_fileclosed_while_streaming_is_recording_segment_not_true_end(self) -> None:
         bucket = self.make_bucket()
         bucket.events["FileClosed"] = {
             "request_id": "segment-fc",
@@ -390,9 +394,9 @@ class EndTailOverwriteTest(unittest.TestCase):
 
         self.assertTrue(is_recording_segment_end_bucket(bucket))
         self.assertTrue(is_meaningful_streaming_end_candidate(bucket))
-        self.assertTrue(is_true_bililive_end_bucket(bucket))
+        self.assertFalse(is_true_bililive_end_bucket(bucket))
 
-    def test_large_streaming_end_candidate_is_meaningful_fileclosed_end(self) -> None:
+    def test_large_streaming_end_candidate_is_recording_segment_not_true_end(self) -> None:
         bucket = self.make_bucket()
         bucket.events["FileClosed"] = {
             "request_id": "main-fc",
@@ -429,7 +433,94 @@ class EndTailOverwriteTest(unittest.TestCase):
 
         self.assertTrue(is_recording_segment_end_bucket(bucket))
         self.assertTrue(is_meaningful_streaming_end_candidate(bucket))
-        self.assertTrue(is_true_bililive_end_bucket(bucket))
+        self.assertFalse(is_true_bililive_end_bucket(bucket))
+
+    def test_streamended_end_merges_recording_segments_for_live_session_stats(self) -> None:
+        cfg = self.make_config()
+        notify_key = "bililive:22625027:乃琳Queen:【归环/突击】我也要死吗？"
+        clear_live_session_segments(notify_key)
+
+        segment_bucket = self.make_bucket()
+        segment_bucket.request_ids.extend(["segment-fc", "segment-se"])
+        segment_bucket.events["FileClosed"] = {
+            "request_id": "segment-fc",
+            "ts": "t1",
+            "payload": {
+                "EventType": "FileClosed",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "RelativePath": "rec/part1.flv",
+                    "FileSize": 1000,
+                    "Duration": 7200,
+                    "Streaming": True,
+                    "Recording": True,
+                },
+            },
+        }
+        segment_bucket.events["SessionEnded"] = {
+            "request_id": "segment-se",
+            "ts": "t2",
+            "payload": {
+                "EventType": "SessionEnded",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "Streaming": True,
+                    "Recording": False,
+                },
+            },
+        }
+        self.assertTrue(remember_live_session_segment(cfg, notify_key, segment_bucket))
+
+        final_bucket = self.make_bucket()
+        final_bucket.request_ids.extend(["final-fc", "stream-ended"])
+        final_bucket.events["FileClosed"] = {
+            "request_id": "final-fc",
+            "ts": "t3",
+            "payload": {
+                "EventType": "FileClosed",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "RelativePath": "rec/part2.flv",
+                    "FileSize": 2500,
+                    "Duration": 1800,
+                    "Streaming": True,
+                    "Recording": True,
+                },
+            },
+        }
+        final_bucket.events["StreamEnded"] = {
+            "request_id": "stream-ended",
+            "ts": "t4",
+            "payload": {
+                "EventType": "StreamEnded",
+                "EventData": {
+                    "RoomId": 22625027,
+                    "Name": "乃琳Queen",
+                    "Title": "【归环/突击】我也要死吗？",
+                    "Streaming": False,
+                    "Recording": False,
+                },
+            },
+        }
+
+        self.assertTrue(is_true_bililive_end_bucket(final_bucket))
+        merged = apply_live_session_segments_to_bucket(notify_key, final_bucket)
+        self.assertIsNotNone(merged)
+        context = build_aggregate_context(final_bucket)
+        self.assertEqual(context["recording_segment_count"], 2)
+        self.assertEqual(context["duration_seconds"], 9000)
+        self.assertEqual(context["duration"], "2h30m0s")
+        self.assertEqual(context["file_size_bytes"], 3500)
+        self.assertEqual(context["file_size"], "3.42 KB")
+        self.assertIn("part1.flv", context["recording_segment_names"])
+        self.assertIn("part2.flv", context["recording_segment_names"])
+        clear_live_session_segments(notify_key)
 
     def test_tiny_streaming_end_candidate_can_still_be_suppressed_as_segment(self) -> None:
         bucket = self.make_bucket()
