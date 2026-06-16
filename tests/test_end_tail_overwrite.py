@@ -10,6 +10,7 @@ from webhook_to_napcat.server import (
     cancel_pending_start_after_end,
     get_bucket_field_value,
     get_start_after_end_confirm_window_ms,
+    handle_aggregate_notification,
     hold_start_after_recent_end,
     is_recording_segment_end_bucket,
     is_meaningful_streaming_end_candidate,
@@ -24,6 +25,8 @@ from webhook_to_napcat.server import (
     should_replace_aggregate_bucket_event,
     should_suppress_recent_forwarded_end_candidate,
     should_suppress_recent_forwarded_start_candidate,
+    PENDING_END_LOCK,
+    PENDING_END_NOTIFICATIONS,
 )
 
 
@@ -40,6 +43,14 @@ class EndTailOverwriteTest(unittest.TestCase):
             auth={},
             target={"private": 1, "group": None},
         )
+
+
+    def tearDown(self) -> None:
+        with PENDING_END_LOCK:
+            for pending in PENDING_END_NOTIFICATIONS.values():
+                if pending.timer is not None:
+                    pending.timer.cancel()
+            PENDING_END_NOTIFICATIONS.clear()
 
     def make_config(self) -> Config:
         return Config(
@@ -593,6 +604,97 @@ class EndTailOverwriteTest(unittest.TestCase):
 
         self.assertFalse(is_recording_segment_end_bucket(bucket))
         self.assertTrue(is_true_bililive_end_bucket(bucket))
+
+
+    def test_empty_streamended_merges_into_pending_stats_candidate(self) -> None:
+        group_config = {
+            "event_order": ["FileClosed", "SessionEnded", "StreamEnded"],
+            "outputs": [
+                {
+                    "match": {
+                        "event_types_all": ["FileClosed"],
+                        "event_types_any": ["SessionEnded", "StreamEnded"],
+                    },
+                    "output": {"type": "template", "template": "END {title}"},
+                    "targets": ["default"],
+                }
+            ],
+        }
+
+        stats_bucket = self.make_bucket()
+        stats_bucket.group_config = group_config
+        stats_bucket.key = "aggregate:bililive_end:end:22632424:贝拉kira"
+        stats_bucket.request_ids.extend(["session-ended", "file-closed"])
+        stats_bucket.events["SessionEnded"] = {
+            "request_id": "session-ended",
+            "ts": "t1",
+            "payload": {
+                "EventType": "SessionEnded",
+                "EventData": {
+                    "RoomId": 22632424,
+                    "Name": "贝拉kira",
+                    "Title": "【突击】早上很坏！贝极星！",
+                    "SessionId": "session-1",
+                    "Streaming": True,
+                    "Recording": False,
+                },
+            },
+        }
+        stats_bucket.events["FileClosed"] = {
+            "request_id": "file-closed",
+            "ts": "t1",
+            "payload": {
+                "EventType": "FileClosed",
+                "EventData": {
+                    "RoomId": 22632424,
+                    "Name": "贝拉kira",
+                    "Title": "【突击】早上很坏！贝极星！",
+                    "RelativePath": "rec/main.flv",
+                    "FileSize": 2504302033,
+                    "Duration": 7266.716,
+                    "Streaming": True,
+                    "Recording": True,
+                },
+            },
+        }
+
+        cfg = self.make_config()
+        self.assertTrue(handle_aggregate_notification(cfg, stats_bucket))
+
+        stream_bucket = self.make_bucket()
+        stream_bucket.group_config = group_config
+        stream_bucket.key = "aggregate:bililive_end:end:22632424:贝拉kira"
+        stream_bucket.request_ids.extend(["stream-ended"])
+        stream_bucket.events["StreamEnded"] = {
+            "request_id": "stream-ended",
+            "ts": "t2",
+            "payload": {
+                "EventType": "StreamEnded",
+                "EventData": {
+                    "RoomId": 22632424,
+                    "Name": "贝拉kira",
+                    "Title": "【突击】早上很坏！贝极星！",
+                    "Streaming": False,
+                    "Recording": False,
+                },
+            },
+        }
+
+        # StreamEnded alone does not match the user-facing output, but it must still
+        # be held as a control event and merged into the pending FileClosed stats.
+        self.assertTrue(handle_aggregate_notification(cfg, stream_bucket))
+
+        notify_key = "bililive:22632424:贝拉kira:【突击】早上很坏！贝极星！"
+        with PENDING_END_LOCK:
+            pending = PENDING_END_NOTIFICATIONS.get(notify_key)
+            self.assertIsNotNone(pending)
+            assert pending is not None
+            self.assertIs(pending.bucket, stats_bucket)
+            self.assertIn("StreamEnded", pending.bucket.events)
+            self.assertIn("stream-ended", pending.bucket.request_ids)
+
+        self.assertFalse(is_recording_segment_end_bucket(stats_bucket))
+        self.assertTrue(is_true_bililive_end_bucket(stats_bucket))
 
     def test_recent_forwarded_start_suppresses_stronger_streamstarted_followup(self) -> None:
         bucket = self.make_start_bucket()

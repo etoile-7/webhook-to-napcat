@@ -3195,18 +3195,33 @@ def flush_pending_end_notification(cfg: Config, notify_key: str) -> None:
 def handle_aggregate_notification(cfg: Config, bucket: AggregateBucket) -> bool:
     message, aggregate_meta = build_aggregate_message(bucket)
     message_record = build_aggregate_message_record(bucket, aggregate_meta)
-    preview_text = get_rendered_message_preview(message) or "(rich media message)"
-
-    if not message:
-        message_record["outcome"] = "suppressed"
-        append_message_log(cfg, message_record)
-        eprint(json.dumps({"event": "aggregate_suppressed", "request_ids": bucket.request_ids, "group_key": bucket.key}, ensure_ascii=False))
-        return True
+    preview_text = get_rendered_message_preview(message) if message else ""
+    if message and not preview_text:
+        preview_text = "(rich media message)"
 
     notify_key = build_bililive_notification_key(aggregate_meta)
     group_name = str(aggregate_meta.get("group_name") or "").strip()
     event_types = set(aggregate_meta.get("event_types") or [])
     window_ms = max(0, int(cfg.notify_debounce_ms or 0))
+
+    # A standalone StreamEnded often has no FileClosed stats, so it may not match a
+    # user-facing end template.  It is still a lifecycle control event and must be
+    # allowed to enter the pending-end window so it can merge with an earlier/later
+    # FileClosed+SessionEnded candidate.  Suppressing it here makes the candidate
+    # look like a streaming recording split and incorrectly drops the real 下播.
+    can_hold_empty_stream_end = bool(
+        not message
+        and notify_key
+        and window_ms > 0
+        and group_name == "bililive_end"
+        and "StreamEnded" in event_types
+    )
+
+    if not message and not can_hold_empty_stream_end:
+        message_record["outcome"] = "suppressed"
+        append_message_log(cfg, message_record)
+        eprint(json.dumps({"event": "aggregate_suppressed", "request_ids": bucket.request_ids, "group_key": bucket.key}, ensure_ascii=False))
+        return True
 
     if group_name == "bililive_end" and is_recording_segment_end_bucket(bucket):
         remember_live_session_segment(cfg, notify_key, bucket)
