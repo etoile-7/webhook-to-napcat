@@ -1,67 +1,62 @@
 # webhook-to-napcat
 
-中文说明 | [English](./README_en.md)
+把 HTTP Webhook 转发到 NapCat（OneBot v11）的小服务。
 
-通过 NapCat（OneBot v11）接收 HTTP Webhook 并转发到 QQ。
+这版只保留三条链路：
 
-一个开箱即用的小项目：把服务器事件、CI 通知、应用回调或自定义 Webhook，快速变成 QQ 消息。
+- BililiveRecorder 通知：识别直播录制事件，聚合开播/下播通知。
+- ito 内部通知：按 `通知系统Webhook规范.md` 转发 `summary` 和附件。
+- 未知通知：默认原样转发；如果正文里有 base64，会先保存为附件，正文只保留附件摘要。
 
-## 功能特性
+通用规则配置和文案配置已经删除。项目不再通过外部规则文件拼接消息，也不再保留普通通知的特殊匹配逻辑。
 
-- 监听可配置的 host / port / path
-- 支持接收 `application/json`、`application/x-www-form-urlencoded`、`text/plain`
-- 支持转发到 QQ 私聊或群聊
-- 支持可选共享密钥校验
-- 自动按 QQ 聊天习惯拆分长消息
-- NapCat 请求支持重试和指数退避
-- 提供 GHCR 镜像，可直接拉取部署
+## 配置
 
-## 部署方式
+常用环境变量：
 
-### Docker Compose（推荐）
+| 环境变量 | 说明 |
+|---|---|
+| `LISTEN_HOST` | 监听地址，默认 `0.0.0.0` |
+| `LISTEN_PORT` | 监听端口，默认 `8787` |
+| `WEBHOOK_PATH` | Webhook 路径，默认 `/webhook` |
+| `WEBHOOK_SECRET` | 可选共享密钥，可放在 `X-Webhook-Secret` 请求头或 `secret` 查询参数 |
+| `NAPCAT_BASE_URL` | NapCat HTTP API 地址 |
+| `NAPCAT_TOKEN` | 可选 NapCat 访问令牌 |
+| `NAPCAT_TOKEN_MODE` | `header` 或 `query` |
+| `NAPCAT_PRIVATE_QQ` | 默认 QQ 私聊目标 |
+| `NAPCAT_GROUP_QQ` | 默认 QQ 群目标 |
+| `NAPCAT_TIMEOUT` | NapCat 请求超时，默认 `10` |
+| `NAPCAT_RETRIES` | NapCat 请求重试次数，默认 `5` |
+| `QQ_CHUNK_SIZE` | QQ 文本拆分长度，默认 `280` |
+| `WEBHOOK_LOG_DIR` | JSONL 日志目录，默认 `/logs` |
+| `WEBHOOK_MEDIA_DIR` | base64 附件在服务内的保存目录，默认 `/app/media` |
+| `WEBHOOK_PUBLIC_MEDIA_DIR` | 写入消息和日志里的媒体路径前缀，默认 `/opt/WebhookToNapcat/media` |
 
-项目内已附带 `docker-compose.yml`，默认拉取 GHCR 镜像，不需要本地构建。
+BililiveRecorder 相关配置：
 
-你只需要直接编辑 `docker-compose.yml` 里的 `environment`：
+| 环境变量 | 说明 |
+|---|---|
+| `WEBHOOK_AGGREGATE_WINDOW_MS` | 开播/下播事件聚合窗口，默认 `3000` |
+| `WEBHOOK_NOTIFY_DEBOUNCE_MS` | 下播等待窗口，默认 `15000` |
+| `WEBHOOK_LIVE_SESSION_SEGMENT_TTL_MS` | 录制分段统计缓存时间，默认 18 小时 |
+| `WEBHOOK_POST_END_START_CONFIRM_MS` | 下播后疑似重连开播确认窗口，默认 `45000` |
+| `BILILIVE_XML_BASE_DIR` | XML 弹幕统计文件根目录，留空则不读取 XML |
+| `BILILIVE_XML_STRIP_PREFIXES` | 从录制相对路径里剥离的前缀，多个用英文逗号分隔 |
+| `BILILIVE_GIFT_PRICE_TABLE` | 礼物价格 Markdown 表路径 |
 
-```yaml
-environment:
-  LISTEN_HOST: "0.0.0.0"
-  LISTEN_PORT: "8787"
-  WEBHOOK_PATH: "/webhook"
-  WEBHOOK_SECRET: ""
-  NAPCAT_BASE_URL: "http://host.docker.internal:3001"
-  NAPCAT_TOKEN: ""
-  NAPCAT_TOKEN_MODE: "header"
-  NAPCAT_PRIVATE_QQ: "YOUR_QQ_NUMBER"
-  NAPCAT_GROUP_QQ: ""
-  WEBHOOK_LOG_DIR: "/app/logs"
-```
+ito 内部通知相关配置：
 
-```yaml
-volumes:
-  # rules.json / cover / logs 共用同一个工作目录
-  - ".:/app"
-```
+| 环境变量 | 说明 |
+|---|---|
+| `WEBHOOK_INTERNAL_DEDUPE_TTL_SECONDS` | `notification_id` 内存去重时间，默认 24 小时 |
 
-至少改这两项：
+## Docker Compose
 
-- `NAPCAT_BASE_URL`
-- 默认目标（可选其一，也可两者都配）：`NAPCAT_PRIVATE_QQ` / `NAPCAT_GROUP_QQ`
-
-如果你准备把目标完全写进 `rules.json` / 聚合模板里，也可以两个默认目标都不配。
-
-然后启动：
+直接编辑 `docker-compose.yml` 里的环境变量，然后启动：
 
 ```bash
 docker compose pull
 docker compose up -d
-```
-
-查看状态：
-
-```bash
-docker compose ps
 ```
 
 查看日志：
@@ -70,659 +65,96 @@ docker compose ps
 docker compose logs -f
 ```
 
-消息日志默认会落盘到当前工作目录：
+日志默认写入：
 
 ```text
 ./logs
 ```
 
-容器内对应目录是：
+base64 附件默认写入：
 
 ```text
-/app/logs
+./media
 ```
 
-日志按分层写入：
+## 通知处理
 
-- `requests-YYYY-MM.jsonl`：所有入站 webhook 请求（包括 path 不匹配、secret 校验失败）
-- `messages-YYYY-MM.jsonl`：已接受并准备转发 / 已转发到 NapCat 的消息记录
-- `errors-YYYY-MM.jsonl`：鉴权失败、路由失败、NapCat 转发失败等错误记录
+### BililiveRecorder
 
-### Docker run
+当 JSON 里有 `EventType` 和 `EventData`，且事件属于下面这些类型时，会进入 BililiveRecorder 链路：
 
-如果你不想改 compose，也可以直接一条命令启动：
+```text
+StreamStarted
+SessionStarted
+FileOpening
+FileClosed
+SessionEnded
+StreamEnded
+```
+
+现在文案是内置固定格式：
+
+- 开播只认 `StreamStarted`，`SessionStarted` / `FileOpening` 只参与聚合判断。
+- 下播会在等待窗口里合并 `StreamEnded` 和带统计的 `FileClosed` / `SessionEnded`。
+- 直播中录制切段不会被当成真正下播。
+- 真实下播会合并当前直播周期内的录制分段时长、大小和可读取的 XML 统计。
+
+### ito 内部通知
+
+当 JSON 里 `program_id` 等于 `ito` 时，会优先进入内部通知链路。
+
+请求正文需要包含这 7 个顶层字段：
+
+```text
+notification_id
+program_id
+program_name
+targets
+summary
+sent_at
+attachments
+```
+
+转发规则很简单：
+
+- 用 `notification_id` 做短期去重。
+- `targets` 里的 `user` 转 QQ 私聊，`group` 转 QQ 群。
+- 只把 `summary` 当正文发给用户。
+- 如果有 `attachments`，会在 `summary` 发送后先保存附件，再作为 QQ 文件发送。
+- 附件发送失败不会影响 `summary` 的发送结果，只会记录到日志。
+
+### 未知通知
+
+不属于 BililiveRecorder，也不是 `program_id=ito` 的请求，会进入未知通知链路。
+
+- JSON 会按原始结构转成多行文本发送。
+- 纯文本会直接发送。
+- base64 字段会先保存为附件，正文里只显示保存摘要。
+- 图片附件会尽量作为 QQ 图片发送。
+
+## 本地运行
 
 ```bash
-docker run -d \
-  --name webhook-to-napcat \
-  --restart unless-stopped \
-  --add-host=host.docker.internal:host-gateway \
-  -p 8787:8787 \
-  -v /opt/WebhookToNapcat:/app \
-  -e LISTEN_HOST=0.0.0.0 \
-  -e LISTEN_PORT=8787 \
-  -e WEBHOOK_PATH=/webhook \
-  -e WEBHOOK_LOG_DIR=/app/logs \
-  -e NAPCAT_BASE_URL=http://host.docker.internal:3001 \
-  -e NAPCAT_PRIVATE_QQ=YOUR_QQ_NUMBER \
-  ghcr.io/etoile-7/webhook-to-napcat:latest
+python3 -m pip install -e .
+webhook-to-napcat
 ```
 
-如果发群，把：
-
-- `NAPCAT_PRIVATE_QQ=...`
-
-换成：
-
-- `NAPCAT_GROUP_QQ=你的群号`
-
-## 配置说明
-
-配置主要写在 `docker-compose.yml` 的 `environment` 里，或者通过 `docker run -e ...` 直接传入。
-
-| 环境变量 | 说明 |
-|---|---|
-| `LISTEN_HOST` | 监听地址，默认 `0.0.0.0` |
-| `LISTEN_PORT` | 监听端口，默认 `8787` |
-| `WEBHOOK_PATH` | Webhook 路径，默认 `/webhook` |
-| `WEBHOOK_SECRET` | 可选共享密钥 |
-| `NAPCAT_BASE_URL` | NapCat HTTP 地址，默认 `http://host.docker.internal:3001` |
-| `NAPCAT_TOKEN` | 可选 NapCat 访问令牌 |
-| `NAPCAT_TOKEN_MODE` | `header` 或 `query` |
-| `NAPCAT_PRIVATE_QQ` | 默认 QQ 私聊用户 ID（可与群号同时配置） |
-| `NAPCAT_GROUP_QQ` | 默认 QQ 群号（可与私聊同时配置） |
-| `NAPCAT_TIMEOUT` | 单次请求超时时间 |
-| `NAPCAT_RETRIES` | 重试次数 |
-| `WEBHOOK_RULES_PATH` | 规则文件路径，默认 `/app/rules.json` |
-| `WEBHOOK_LOG_DIR` | 消息日志目录，程序默认 `/logs`；推荐 compose 部署设为 `/app/logs`，按月分层写入 `requests-YYYY-MM.jsonl` / `messages-YYYY-MM.jsonl` / `errors-YYYY-MM.jsonl` |
-| `WEBHOOK_AGGREGATE_WINDOW_MS` | BililiveRecorder 事件聚合窗口（毫秒），默认 `3000` |
-| `WEBHOOK_NOTIFY_FILE_OPENING` | 是否单独发送 `FileOpening` 事件，默认 `0`（只参与聚合不单发） |
-| `QQ_CHUNK_SIZE` | QQ 单条消息长度上限 |
-| `TITLE_PREFIX` | 转发消息标题前缀 |
-| `INCLUDE_HEADERS` | 是否附带部分请求头信息 |
-
-## 连接 NapCat
-
-这个项目通过 NapCat 的 OneBot v11 HTTP API 发消息给 QQ，连接方式是 HTTP，不是 WebSocket。
-
-最关键的配置是：
-
-```yaml
-NAPCAT_BASE_URL: "http://host.docker.internal:3001"
-NAPCAT_TOKEN: ""
-NAPCAT_TOKEN_MODE: "header"
-```
-
-### 这 3 个字段分别是什么
-
-- `NAPCAT_BASE_URL`：NapCat HTTP API 地址
-- `NAPCAT_TOKEN`：如果你的 NapCat 开了鉴权，就填这里；没开可留空
-- `NAPCAT_TOKEN_MODE`：鉴权传递方式，支持 `header` 或 `query`
-
-### 常见连接场景
-
-#### 场景 1：NapCat 跑在宿主机，当前项目跑在 Docker 容器里
-
-推荐：
-
-```yaml
-NAPCAT_BASE_URL: "http://host.docker.internal:3001"
-```
-
-项目的 compose 已经带了：
-
-```yaml
-extra_hosts:
-  - "host.docker.internal:host-gateway"
-```
-
-所以大多数 Linux Docker 环境下都能直接访问宿主机上的 NapCat。
-
-#### 场景 2：NapCat 不在 3001 端口
-
-把端口改成你实际的 HTTP API 端口：
-
-```yaml
-NAPCAT_BASE_URL: "http://host.docker.internal:实际端口"
-```
-
-#### 场景 3：`host.docker.internal` 不可用
-
-可以直接改成宿主机实际 IP，例如：
-
-```yaml
-NAPCAT_BASE_URL: "http://192.168.1.77:3001"
-```
-
-### 如果 NapCat 开了 token
-
-```yaml
-NAPCAT_TOKEN: "your_token_here"
-NAPCAT_TOKEN_MODE: "header"
-```
-
-如果你的 NapCat 要求 query 方式传 token，则改成：
-
-```yaml
-NAPCAT_TOKEN_MODE: "query"
-```
-
-### NapCat 连接是否正常，怎么判断
-
-启动后先看容器日志：
+测试：
 
 ```bash
-docker compose logs -f
+python3 -m pytest
 ```
 
-然后发一个测试 webhook：
+健康检查：
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
+发送一个未知通知测试：
 
 ```bash
 curl -X POST 'http://127.0.0.1:8787/webhook' \
   -H 'Content-Type: application/json' \
   -d '{"event":"test","status":"ok"}'
 ```
-
-如果配置正确，目标 QQ 会收到消息；如果 NapCat 地址或 token 错了，日志里通常会看到连接失败、401、403 或超时。
-
-## Docker 说明
-
-当前项目的 `docker-compose.yml` 默认使用远程镜像：
-
-```yaml
-image: ghcr.io/etoile-7/webhook-to-napcat:latest
-```
-
-所以普通部署时，不需要先执行 `docker build`。
-
-如果你在 Linux 上 Docker 里无法解析 `host.docker.internal`，可以：
-
-- 改成宿主机实际 IP
-- 或保留 compose 里的：`host.docker.internal:host-gateway`
-
-## 聚合规则（模板驱动）
-
-除了普通 `rules` 外，`rules.json` 还可以定义 `aggregate`，把“是否聚合 / 聚合键 / 聚合窗口 / suppress 哪些事件 / 命中哪条输出模板”都放进模板配置里。
-
-一个最小示例：
-
-```json
-{
-  "aggregate": {
-    "enabled": true,
-    "window_ms": 3000,
-    "groups": [
-      {
-        "name": "bililive_start",
-        "phase": "start",
-        "match": {
-          "field_in": {
-            "EventType": ["StreamStarted", "SessionStarted", "FileOpening"]
-          }
-        },
-        "key_fields": ["EventData.RoomId", "EventData.Name"],
-        "event_order": ["StreamStarted", "SessionStarted", "FileOpening"],
-        "suppress_event_types": ["FileOpening"],
-        "outputs": [
-          {
-            "match": { "event_types_all": ["StreamStarted", "SessionStarted"] },
-            "output": {
-              "type": "template",
-              "template": "🟢［{name}］开播啦！\\n标题：{title}\\n分区：{area}\\n房间：{room_id}\\n时间：{time}"
-            }
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-输出类型除了 `template` / `field` / `summary` 外，现在还支持 `segments`：
-
-- `text` 段：发送文字
-- `image` 段：发送图片，`file` 支持 `http(s)://...`、`base64://...` 等 NapCat / OneBot 可识别地址
-- 如果 rich media 发送失败，可用 `fallback_template` 自动退回纯文本
-- 模板渲染遇到缺失字段时，会仅保留该占位符原样输出（如 `{missing_key}`），其余已存在字段仍会正常展开
-
-示例：开播时发送“文字 + 图片 + 文字”：
-
-```json
-{
-  "output": {
-    "type": "segments",
-    "segments": [
-      { "type": "text", "text": "🟢［{name}］开播啦！" },
-      { "type": "image", "file": "{cover_base64}" },
-      { "type": "text", "text": "标题：{title}\n分区：{area}\n房间：{room_id}\n时间：{time}" }
-    ],
-    "fallback_template": "🟢［{name}］开播啦！\n标题：{title}\n分区：{area}\n房间：{room_id}\n时间：{time}"
-  }
-}
-```
-
-聚合 `context` 里除了直接取字段外，还支持一些额外来源：
-
-- `source: "template"`：把上下文再次格式化成新字段
-- `source: "xml_live_stats"`：从 XML 统计里取值
-- `source: "local_file_base64"`：读取本地文件并编码成 `base64://...`
-- `source: "room_cover_base64"`：按 `room_id` 从封面索引里读取本地封面并编码成 `base64://...`
-
-如果模板里想直接用 `{sc_count}` / `{sc_total}` / `{captain_count}` 这类统计字段，需要先在 `aggregate.groups[*].context` 里显式映射。例如：
-
-```json
-{
-  "context": {
-    "sc_count": {
-      "source": "xml_live_stats",
-      "key": "sc_count",
-      "base_dir": "/data/zhijiang_video",
-      "relative_path_field": "EventData.RelativePath",
-      "gift_prices_markdown_path": "/app/bilibili_gift_prices.md",
-      "strip_prefixes": ["rec/"],
-      "default": "0"
-    },
-    "sc_total": {
-      "source": "xml_live_stats",
-      "key": "sc_total",
-      "base_dir": "/data/zhijiang_video",
-      "relative_path_field": "EventData.RelativePath",
-      "gift_prices_markdown_path": "/app/bilibili_gift_prices.md",
-      "strip_prefixes": ["rec/"]
-    },
-    "captain_count": {
-      "source": "xml_live_stats",
-      "key": "captain_count",
-      "base_dir": "/data/zhijiang_video",
-      "relative_path_field": "EventData.RelativePath",
-      "gift_prices_markdown_path": "/app/bilibili_gift_prices.md",
-      "strip_prefixes": ["rec/"],
-      "default": "0"
-    }
-  }
-}
-```
-
-静态直播间封面示例：先在聚合组 `context` 里把封面文件读成 `base64://...`，再在需要封面的直播间细分规则里用 `cover_file: "{cover_base64}"`。这样发送给 NapCat 的是 base64 图片，不依赖 NapCat 容器里的文件映射路径。
-
-```json
-{
-  "context": {
-    "cover_base64": {
-      "source": "room_cover_base64",
-      "index_path": "cover/index.json"
-    }
-  }
-}
-```
-
-Docker 部署时推荐把工作目录整体挂到 `/app`（例如 `.:/app`），这样 `rules.json`、`cover/`、`logs/` 共用同一个工作目录。可以配合仓库里的抓取脚本，先把常用直播间封面落盘到宿主机：
-
-```bash
-python3 scripts/fetch_bilibili_room_covers.py \
-  --output-dir /opt/WebhookToNapcat/cover \
-  --room 22632424:贝拉kira \
-  --room 22637261:嘉然今天吃什么
-```
-
-脚本会生成：
-
-- `/opt/WebhookToNapcat/cover/<room_id>.<ext>`
-- `/opt/WebhookToNapcat/cover/index.json`
-
-目前聚合模板可用的上下文字段包括：
-
-- `name`
-- `title`
-- `room_id`
-- `short_id`
-- `session_id`
-- `area_parent`
-- `area_child`
-- `area`
-- `file_path`
-- `file_name`
-- `duration`
-- `duration_seconds`
-- `file_size`
-- `file_size_bytes`
-- `recording`
-- `streaming`
-- `has_stream_ended`
-- `has_file_closed`
-- `has_session_ended`
-- `time`
-- `phase`
-- `group_name`
-- `event_types`
-- `request_count`
-- `event_count`
-- 以及通过 `aggregate.context` 显式映射出来的扩展字段，例如：`sc_count`、`sc_total`、`captain_count`、`interaction_count_display`、`gift_unknown_line`、`total_revenue_label`、`total_revenue`
-
-聚合组里常用字段：
-
-- `match`：哪些 webhook 进入这个聚合组（支持 `field_equals` / `field_in` / `has_keys` / `field_exists`）
-- `key_fields`：按哪些字段决定“是不是同一组消息”
-- `window_ms`：这个组自己的聚合窗口
-- `event_order`：聚合上下文取值时的事件优先级
-- `suppress_event_types`：只参与聚合但不单独体现为通知的事件
-- `outputs`：按已收集到的 `event_types_*` 规则选择最终模板
-- `tail_suppress`：结束阶段的小尾巴过滤阈值；可按 `duration_seconds_max` / `file_size_bytes_max` / `interaction_count_max` / `bullet_count_max` / `sc_total_max` / `total_revenue_max` 等条件抑制明显无意义的尾声残片
-
-`outputs[*].match` 目前支持：
-
-- `event_types_all`
-- `event_types_any`
-- `event_types_none`
-- `field_equals`
-- `field_in`
-
-这样以后改“开播啦 / 下播啦 / 时间放哪 / 哪几类事件合并 / 哪些事件 suppress”，都主要改本地 `rules.json`，不用再改 Python 源码。
-
-### 分级配置：复用输出模板和目标
-
-`rules.json` 支持把常用输出和目标先定义在顶层，再在规则里引用，避免每个直播间重复写一大段模板：
-
-- 顶层 `outputs`：命名输出模板
-- 顶层 `targets`：命名目标列表
-- 规则中可用 `output_ref` / `use` 引用命名输出
-- 也可写 `"output": {"$ref": "名字", ...覆盖字段 }`
-- 输出或规则中可用 `targets_ref` 引用命名目标；如果同一层已经显式写了 `targets` / `target`，显式配置优先
-- `template` 输出可额外写 `cover_file`，渲染时会自动变成「第一行文字 + 图片 + 剩余文字」的 segments；`cover_file` 可以是 `base64://...`，推荐配合 `room_cover_base64` 从工作目录 `cover/` 读取封面并转成 base64 后发送
-
-示例：
-
-```json
-{
-  "outputs": {
-    "start_default": {
-      "type": "template",
-      "template": "🟢［{name}］开播啦！\n标题：{title}\n房间：{room_id}\n时间：{time}"
-    }
-  },
-  "aggregate": {
-    "groups": [
-      {
-        "name": "bililive_start",
-        "context": {
-          "cover_base64": {
-            "source": "room_cover_base64",
-            "index_path": "cover/index.json"
-          }
-        },
-        "outputs": [
-          {
-            "match": {
-              "event_types_all": ["StreamStarted"],
-              "field_equals": { "room_id": 22632424 }
-            },
-            "output": {
-              "$ref": "start_default",
-              "cover_file": "{cover_base64}"
-            },
-            "targets": ["default", { "group": 162525281 }]
-          },
-          {
-            "match": { "event_types_all": ["StreamStarted"] },
-            "output_ref": "start_default"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-补充：`bililive_end` 结束阶段现在会在等待窗口内同时缓存：
-
-- `StreamEnded`（用于确认真正下播）
-- `FileClosed + SessionEnded` 这类带统计的结束候选
-
-最终会优先保留**信息更完整**的结束候选作为唯一对外通知；如果窗口里只出现 `StreamEnded`，则仍会用它作为兜底结束通知。对于时长很短、文件很小、互动极低、无营收的小尾巴，还可以通过 `tail_suppress` 规则直接压掉。
-
-### 在模板里指定推送目标（支持多目标 / 按直播间路由）
-
-现在普通 `rules[*]` 和聚合模板 `aggregate.groups[*].outputs[*]` / `aggregate.groups[*].output` 都支持直接写目标：
-
-- `target`：单个目标
-- `targets`：多个目标
-- 目标格式支持：
-  - `{ "private": 123456 }`
-  - `{ "group": 987654 }`
-  - `"private:123456"`
-  - `"group:987654"`
-  - `"default"`（把默认环境变量目标也一起带上）
-
-示例：只把 **贝拉kira** 的开播消息同时推到“默认私聊 + 指定群聊”，其他直播间仍走默认目标：
-
-```json
-{
-  "aggregate": {
-    "enabled": true,
-    "groups": [
-      {
-        "name": "bililive_start",
-        "phase": "start",
-        "match": {
-          "field_in": {
-            "EventType": ["StreamStarted", "SessionStarted", "FileOpening"]
-          }
-        },
-        "key_fields": ["EventData.RoomId", "EventData.Name"],
-        "outputs": [
-          {
-            "match": {
-              "event_types_all": ["StreamStarted", "SessionStarted"],
-              "field_equals": { "room_id": 22632424 }
-            },
-            "output": {
-              "type": "template",
-              "template": "🟢［{name}］开播啦！\n标题：{title}\n房间：{room_id}\n时间：{time}",
-              "targets": [
-                "default",
-                { "group": 123456789 }
-              ]
-            }
-          },
-          {
-            "match": { "event_types_all": ["StreamStarted", "SessionStarted"] },
-            "output": {
-              "type": "template",
-              "template": "🟢［{name}］开播啦！\n标题：{title}\n房间：{room_id}\n时间：{time}"
-            }
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-这样可以做到：
-
-- 默认都发给自己的私聊
-- 指定直播间额外同步到某个群
-- 或者某个输出只发群、不发私聊
-- 同一条消息同时发多个目标
-
-## 测试 webhook
-
-```bash
-curl -X POST 'http://127.0.0.1:8787/webhook' \
-  -H 'Content-Type: application/json' \
-  -d '{"event":"deploy","status":"ok","repo":"demo"}'
-```
-
-如果转发成功，目标 QQ 会收到一条整理后的消息。
-
-补充：如果 webhook 的 JSON payload 里包含 `content` 字段（例如短信/验证码转发场景），程序会优先只发送 `content` 的内容，不再附带路径、UA 和完整 payload。
-
-## 密钥校验
-
-你可以给 webhook 设置共享密钥，支持两种传递方式：
-
-- Query 参数：`?secret=YOUR_SECRET`
-- 请求头：`X-Webhook-Secret: YOUR_SECRET`
-
-测试：
-
-```bash
-curl -X POST 'http://127.0.0.1:8787/webhook?secret=my_shared_secret' \
-  -H 'X-Webhook-Secret: my_shared_secret' \
-  -H 'Content-Type: application/json' \
-  -d '{"event":"deploy","status":"ok"}'
-```
-
-## 反向代理示例
-
-### Nginx
-
-配置文件示例：`examples/nginx/webhook-to-napcat.conf`
-
-```bash
-sudo cp examples/nginx/webhook-to-napcat.conf /etc/nginx/sites-available/webhook-to-napcat
-sudo ln -s /etc/nginx/sites-available/webhook-to-napcat /etc/nginx/sites-enabled/webhook-to-napcat
-sudo nginx -t && sudo systemctl reload nginx
-```
-
-### Caddy
-
-配置文件示例：`examples/caddy/Caddyfile`
-
-```bash
-sudo cp examples/caddy/Caddyfile /etc/caddy/Caddyfile
-sudo systemctl reload caddy
-```
-
-## GitHub Actions
-
-项目内包含：`.github/workflows/docker-image.yml`
-
-默认功能：
-
-- push / PR 时自动构建 Docker 镜像
-- 非 PR 构建时自动推送到 GHCR
-- 自动生成 `latest`、分支名、tag 版本号、commit SHA 等标签
-
-默认镜像名：
-
-```text
-ghcr.io/etoile-7/webhook-to-napcat
-```
-
-## 开发者说明
-
-如果你是在修改代码、调试 Dockerfile 或想自己本地构建开发镜像，可以手动执行：
-
-```bash
-docker build -t webhook-to-napcat:dev .
-```
-
-但这不是普通部署的默认方式。
-
-## systemd 服务示例
-
-参见：`examples/systemd/webhook-to-napcat.service`
-
-## 项目结构
-
-```text
-webhook-to-napcat/
-├── .github/
-│   └── workflows/
-├── examples/
-│   ├── caddy/
-│   ├── nginx/
-│   └── systemd/
-├── scripts/
-│   └── webhook_to_napcat.py
-├── webhook_to_napcat/
-│   ├── __init__.py
-│   ├── __main__.py
-│   └── server.py
-├── .dockerignore
-├── .gitignore
-├── docker-compose.yml
-├── Dockerfile
-├── LICENSE
-├── README.md
-├── README_en.md
-└── pyproject.toml
-```
-
-## License
-
-MIT
-tc/nginx/sites-available/webhook-to-napcat
-sudo ln -s /etc/nginx/sites-available/webhook-to-napcat /etc/nginx/sites-enabled/webhook-to-napcat
-sudo nginx -t && sudo systemctl reload nginx
-```
-
-### Caddy
-
-配置文件示例：`examples/caddy/Caddyfile`
-
-```bash
-sudo cp examples/caddy/Caddyfile /etc/caddy/Caddyfile
-sudo systemctl reload caddy
-```
-
-## GitHub Actions
-
-项目内包含：`.github/workflows/docker-image.yml`
-
-默认功能：
-
-- push / PR 时自动构建 Docker 镜像
-- 非 PR 构建时自动推送到 GHCR
-- 自动生成 `latest`、分支名、tag 版本号、commit SHA 等标签
-
-默认镜像名：
-
-```text
-ghcr.io/etoile-7/webhook-to-napcat
-```
-
-## 开发者说明
-
-如果你是在修改代码、调试 Dockerfile 或想自己本地构建开发镜像，可以手动执行：
-
-```bash
-docker build -t webhook-to-napcat:dev .
-```
-
-但这不是普通部署的默认方式。
-
-## systemd 服务示例
-
-参见：`examples/systemd/webhook-to-napcat.service`
-
-## 项目结构
-
-```text
-webhook-to-napcat/
-├── .github/
-│   └── workflows/
-├── examples/
-│   ├── caddy/
-│   ├── nginx/
-│   └── systemd/
-├── scripts/
-│   └── webhook_to_napcat.py
-├── webhook_to_napcat/
-│   ├── __init__.py
-│   ├── __main__.py
-│   └── server.py
-├── .dockerignore
-├── .gitignore
-├── docker-compose.yml
-├── Dockerfile
-├── LICENSE
-├── README.md
-├── README_en.md
-└── pyproject.toml
-```
-
-## License
-
-MIT

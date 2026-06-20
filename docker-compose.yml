@@ -46,23 +46,27 @@ services:
       NAPCAT_TIMEOUT: "10"
       NAPCAT_RETRIES: "5"
 
-      # 规则文件路径（容器内）；用于按模板匹配不同 webhook 的输出格式
-      WEBHOOK_RULES_PATH: "/app/rules.json"
-
       # 消息日志目录（容器内），会把每次 webhook 请求/转发结果写成 JSONL
       WEBHOOK_LOG_DIR: "/app/logs"
+
+      # base64 附件在容器内的保存目录，以及写入消息/日志里的宿主机路径前缀
+      WEBHOOK_MEDIA_DIR: "/app/media"
+      WEBHOOK_PUBLIC_MEDIA_DIR: "/opt/WebhookToNapcat/media"
 
       # 长消息拆分时，单条 QQ 消息的最大长度
       QQ_CHUNK_SIZE: "280"
 
-      # 转发到 QQ 时显示的标题前缀
-      TITLE_PREFIX: "📨"
+      # BililiveRecorder 聚合与下播等待窗口
+      WEBHOOK_AGGREGATE_WINDOW_MS: "3000"
+      WEBHOOK_NOTIFY_DEBOUNCE_MS: "15000"
 
-      # 是否在转发消息中附带部分请求头信息
-      INCLUDE_HEADERS: "1"
+      # 可选：BililiveRecorder XML 弹幕统计配置
+      BILILIVE_XML_BASE_DIR: ""
+      BILILIVE_XML_STRIP_PREFIXES: ""
+      BILILIVE_GIFT_PRICE_TABLE: ""
 
     volumes:
-      # 将工作目录整体挂载进容器；rules.json / cover / logs 共用同一个目录
+      # 将工作目录整体挂载进容器；logs / media 共用同一个目录
       - ".:/app"
 
     extra_hosts:

@@ -7,8 +7,6 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY webhook_to_napcat ./webhook_to_napcat
-COPY scripts ./scripts
-COPY rules.json ./rules.json
 
 RUN pip install --no-cache-dir .
 
