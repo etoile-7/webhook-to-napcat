@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   webhook-to-napcat:
     image: ghcr.io/etoile-7/webhook-to-napcat:latest
@@ -36,10 +34,9 @@ services:
       # token 传递方式：header 或 query
       NAPCAT_TOKEN_MODE: "header"
 
-      # 私聊和群聊二选一：
-      # - 私聊：填写 NAPCAT_PRIVATE_QQ
-      # - 群聊：填写 NAPCAT_GROUP_QQ
-      NAPCAT_PRIVATE_QQ: "YOUR_QQ_NUMBER"
+      # 私聊和群聊二选一；目标必须填写数字 QQ 号
+      # 不填写时服务仍可启动，但没有默认转发目标
+      NAPCAT_PRIVATE_QQ: ""
       NAPCAT_GROUP_QQ: ""
 
       # 调用 NapCat HTTP API 时的超时和重试次数

@@ -9,7 +9,6 @@ from webhook_to_napcat.bililive import (
     apply_live_session_segments_to_bucket,
     build_aggregate_context,
     build_end_bucket_metrics,
-    build_start_bucket_score,
     cancel_pending_start_after_end,
     clear_live_session_segments,
     clear_recent_forwarded_start,
@@ -17,7 +16,6 @@ from webhook_to_napcat.bililive import (
     get_recent_forwarded_start,
     handle_end_bucket,
     hold_start_after_recent_end,
-    is_meaningful_streaming_end_candidate,
     is_recording_segment_end_bucket,
     is_recording_segment_start_bucket,
     is_true_bililive_end_bucket,
@@ -26,7 +24,6 @@ from webhook_to_napcat.bililive import (
     remember_recent_forwarded_start,
     should_replace_aggregate_bucket_event,
     should_suppress_recent_forwarded_end_candidate,
-    should_suppress_recent_forwarded_start_candidate,
 )
 from webhook_to_napcat.config import Config
 
@@ -73,12 +70,10 @@ class BililiveTest(unittest.TestCase):
             key="bililive:end:30849777:心宜不是心仪",
             phase="end",
             group_name="bililive_end",
-            group_config={"event_order": ["FileClosed", "SessionEnded", "StreamEnded"]},
-            created_at=0.0,
+            event_order=["FileClosed", "SessionEnded", "StreamEnded"],
             request_path="/webhook",
             remote_ip="127.0.0.1",
             auth={},
-            target={"private": 1},
         )
 
     def make_start_bucket(self) -> AggregateBucket:
@@ -86,12 +81,10 @@ class BililiveTest(unittest.TestCase):
             key="bililive:start:22625027:乃琳Queen",
             phase="start",
             group_name="bililive_start",
-            group_config={"event_order": ["StreamStarted", "SessionStarted", "FileOpening"]},
-            created_at=0.0,
+            event_order=["StreamStarted", "SessionStarted", "FileOpening"],
             request_path="/webhook",
             remote_ip="127.0.0.1",
             auth={},
-            target={"private": 1},
         )
 
     def test_weaker_tail_fileclosed_does_not_replace_main_fileclosed(self) -> None:
@@ -146,18 +139,6 @@ class BililiveTest(unittest.TestCase):
         self.assertFalse(is_recording_segment_start_bucket(bucket))
         self.assertTrue(is_true_bililive_start_bucket(bucket))
 
-    def test_recent_forwarded_start_suppresses_followup_start(self) -> None:
-        bucket = self.make_start_bucket()
-        bucket.request_ids.append("stream-1")
-        bucket.events["StreamStarted"] = {
-            "request_id": "stream-1",
-            "payload": {"EventType": "StreamStarted", "EventData": {"RoomId": 1, "Name": "A", "Title": "T"}},
-            "ts": "t1",
-        }
-        recent_score = (0, 1, 0, 1)
-        self.assertEqual(build_start_bucket_score(bucket), (1, 0, 0, 1))
-        self.assertTrue(should_suppress_recent_forwarded_start_candidate(recent_score, bucket))
-
     def test_post_end_reconnect_start_can_be_held_and_cancelled(self) -> None:
         cfg = make_config()
         bucket = self.make_start_bucket()
@@ -171,7 +152,7 @@ class BililiveTest(unittest.TestCase):
             "ts": "t1",
         }
         self.assertTrue(hold_start_after_recent_end(cfg, notify_key, bucket, "preview"))
-        self.assertTrue(cancel_pending_start_after_end(cfg, notify_key, reason="cancelled_by_followup_true_end", end_bucket=self.make_end_bucket()))
+        self.assertTrue(cancel_pending_start_after_end(cfg, notify_key, reason="cancelled_by_followup_true_end"))
 
     def test_true_end_clears_start_dedupe(self) -> None:
         cfg = make_config()
@@ -208,7 +189,6 @@ class BililiveTest(unittest.TestCase):
             "ts": "t1",
         }
         self.assertTrue(is_recording_segment_end_bucket(bucket))
-        self.assertTrue(is_meaningful_streaming_end_candidate(bucket))
         self.assertFalse(is_true_bililive_end_bucket(bucket))
 
     def test_streamended_merges_recording_segments_for_session_stats(self) -> None:

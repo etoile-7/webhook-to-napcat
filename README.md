@@ -28,6 +28,7 @@
 | `NAPCAT_TIMEOUT` | NapCat 请求超时，默认 `10` |
 | `NAPCAT_RETRIES` | NapCat 请求重试次数，默认 `5` |
 | `QQ_CHUNK_SIZE` | QQ 文本拆分长度，默认 `280` |
+| `WEBHOOK_OUTBOUND_TEXT_MAX_CHARS` | 单条入站通知最多转发的文本长度，默认 `5000` |
 | `WEBHOOK_LOG_DIR` | JSONL 日志目录，默认 `/logs` |
 | `WEBHOOK_MEDIA_DIR` | base64 附件在服务内的保存目录，默认 `/app/media` |
 | `WEBHOOK_PUBLIC_MEDIA_DIR` | 写入消息和日志里的媒体路径前缀，默认 `/opt/WebhookToNapcat/media` |

@@ -57,7 +57,7 @@ class InternalNotificationTest(unittest.TestCase):
             "notification_id": "ito:test:done:1",
             "program_id": "ito",
             "program_name": "ITO",
-            "targets": [{"type": "user", "id": "123"}, {"type": "group", "id": "456"}, {"type": "channel", "id": "789"}],
+            "targets": [{"type": "user", "id": "123"}, {"type": "group", "id": "456"}],
             "summary": "ITO\n状态：完成",
             "sent_at": "2026-06-10T13:30:00Z",
             "attachments": [
@@ -76,6 +76,52 @@ class InternalNotificationTest(unittest.TestCase):
             )
         self.assertEqual(result.status_code, 400)
         self.assertFalse(result.body["ok"])
+        self.assertEqual(result.body["route"], "ito")
+
+    def test_rejects_unexpected_top_level_fields(self) -> None:
+        payload = self.payload()
+        payload["EventType"] = "StreamStarted"
+        with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
+            result = internal.handle_internal_notification(
+                make_config(media_dir, public_dir),
+                payload,
+                request_id="req-extra",
+                request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"},
+                auth={},
+            )
+        self.assertEqual(result.status_code, 400)
+        self.assertFalse(result.body["ok"])
+        self.assertIn("unexpected_fields:EventType", result.body["errors"])
+
+    def test_rejects_unknown_target_type(self) -> None:
+        payload = self.payload()
+        payload["targets"] = [{"type": "channel", "id": "789"}]
+        with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
+            result = internal.handle_internal_notification(
+                make_config(media_dir, public_dir),
+                payload,
+                request_id="req-target-type",
+                request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"},
+                auth={},
+            )
+        self.assertEqual(result.status_code, 400)
+        self.assertFalse(result.body["ok"])
+        self.assertIn("target_0_type_invalid", result.body["errors"])
+
+    def test_rejects_non_numeric_target_id(self) -> None:
+        payload = self.payload()
+        payload["targets"] = [{"type": "user", "id": "user-001"}]
+        with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
+            result = internal.handle_internal_notification(
+                make_config(media_dir, public_dir),
+                payload,
+                request_id="req-target-id",
+                request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"},
+                auth={},
+            )
+        self.assertEqual(result.status_code, 400)
+        self.assertFalse(result.body["ok"])
+        self.assertIn("target_0_id_not_numeric", result.body["errors"])
 
     def test_sends_summary_and_image_attachment(self) -> None:
         calls = {"text": [], "files": [], "order": []}

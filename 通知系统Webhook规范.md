@@ -88,7 +88,7 @@ program_id:业务对象:通知动作:必要的细分标识
 示例：
 
 ```text
-example:resource-456:completed:main
+ito:resource-456:completed:main
 ```
 
 如果发送端只能在发送时生成唯一值，也可以追加发送时间，但要注意：同一次通知重试时不能重新生成不同的值。
@@ -112,7 +112,7 @@ example:resource-456:completed:main
 ]
 ```
 
-转发程序应当忽略不认识的 `type`（目标类型），并记录日志。发送端不应把空 `id`（目标标识）的目标写入列表。
+当前转发程序会严格校验转发目标：`type`（目标类型）只允许 `user`（单人）或 `group`（群组），`id`（目标 ID）必须是数字 QQ 号。出现未知目标类型、空目标 ID 或非数字目标 ID 时，整条通知会被拒绝。
 
 ## 附件
 
@@ -147,7 +147,7 @@ example:resource-456:completed:main
 转发程序只依赖 7 个顶层字段，按下面顺序处理：
 
 1. 校验 JSON（结构化数据）是否能解析；失败则记录原始请求摘要，不转发附件。
-2. 校验 `notification_id`、`program_id`、`program_name`、`targets`、`summary`、`sent_at`、`attachments` 是否存在。
+2. 校验正文是否只包含 `notification_id`、`program_id`、`program_name`、`targets`、`summary`、`sent_at`、`attachments` 这 7 个顶层字段，并校验转发目标是否都是合法 QQ 私聊或群聊目标。
 3. 用 `notification_id`（通知唯一标识）做短期去重，避免 webhook（网络回调）重试导致重复刷屏。
 4. 对 `targets`（转发目标）逐个发送；目标类型如何发送由具体转发程序决定。
 5. 发送 `summary`（摘要）文本。
@@ -160,13 +160,13 @@ example:resource-456:completed:main
 
 ```json
 {
-  "notification_id": "example:resource-456:completed:main",
-  "program_id": "example",
-  "program_name": "ExampleProgram",
+  "notification_id": "ito:resource-456:completed:main",
+  "program_id": "ito",
+  "program_name": "ITO",
   "targets": [
-    {"type": "user", "id": "user-001"}
+    {"type": "user", "id": "123456"}
   ],
-  "summary": "ExampleProgram\n状态：处理完成\n事件：event-123\n对象：resource-456\n标题：每日任务处理\n结果：生成 3 个文件\n链接：https://example.com/results/123\n耗时：2分18秒\n时间：2026-06-10T21:30:00+08:00",
+  "summary": "ITO\n状态：处理完成\n事件：event-123\n对象：resource-456\n标题：每日任务处理\n结果：生成 3 个文件\n链接：https://example.com/results/123\n耗时：2分18秒\n时间：2026-06-10T21:30:00+08:00",
   "sent_at": "2026-06-10T13:30:00Z",
   "attachments": [
     {

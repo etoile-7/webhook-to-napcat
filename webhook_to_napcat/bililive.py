@@ -43,17 +43,13 @@ class AggregateBucket:
     key: str
     phase: str
     group_name: str
-    group_config: dict[str, Any]
-    created_at: float
+    event_order: list[str]
     request_path: str
     remote_ip: str
     auth: dict[str, Any]
-    target: dict[str, Any] = field(default_factory=dict)
     request_ids: list[str] = field(default_factory=list)
     events: dict[str, dict[str, Any]] = field(default_factory=dict)
-    payload_summaries: list[str] = field(default_factory=list)
     computed: dict[str, Any] = field(default_factory=dict)
-    timer: threading.Timer | None = None
 
 
 @dataclass
@@ -110,10 +106,10 @@ def event_phase(event_type: str) -> str:
     return "start" if event_type in START_EVENTS else "end"
 
 
-def default_group_config(phase: str) -> dict[str, Any]:
+def default_event_order(phase: str) -> list[str]:
     if phase == "start":
-        return {"event_order": ["StreamStarted", "SessionStarted", "FileOpening"]}
-    return {"event_order": ["FileClosed", "SessionEnded", "StreamEnded"]}
+        return ["StreamStarted", "SessionStarted", "FileOpening"]
+    return ["FileClosed", "SessionEnded", "StreamEnded"]
 
 
 def bucket_key(payload: dict[str, Any], phase: str) -> str:
@@ -368,10 +364,7 @@ def compute_xml_live_stats(xml_path: Path, price_table_path: str = "") -> dict[s
 
 
 def get_bucket_field_value(bucket: AggregateBucket, field: str) -> Any:
-    event_order = bucket.group_config.get("event_order")
-    ordered_types: list[str] = []
-    if isinstance(event_order, list):
-        ordered_types.extend(str(item) for item in event_order)
+    ordered_types = [str(item) for item in bucket.event_order]
     for event_type in bucket.events:
         if event_type not in ordered_types:
             ordered_types.append(event_type)
@@ -396,8 +389,7 @@ def parse_event_timestamp(value: Any) -> str | None:
 
 def get_bucket_display_time(bucket: AggregateBucket, mode: str | None = None) -> str | None:
     values: list[str] = []
-    event_order = bucket.group_config.get("event_order")
-    ordered_types = [str(item) for item in event_order] if isinstance(event_order, list) else list(bucket.events)
+    ordered_types = [str(item) for item in bucket.event_order]
     for event_type in ordered_types:
         event = bucket.events.get(event_type)
         payload = event.get("payload") if isinstance(event, dict) else None
@@ -564,22 +556,6 @@ def is_recording_segment_end_bucket(bucket: AggregateBucket) -> bool:
     return build_end_bucket_metrics(bucket).get("streaming") is True
 
 
-def is_meaningful_streaming_end_candidate(bucket: AggregateBucket) -> bool:
-    if not is_recording_segment_end_bucket(bucket):
-        return False
-    metrics = build_end_bucket_metrics(bucket)
-    return any(
-        [
-            (safe_float(metrics.get("duration_seconds")) or 0) >= 60.0,
-            (safe_int(metrics.get("file_size_bytes")) or 0) >= 64 * 1024 * 1024,
-            (safe_int(metrics.get("interaction_count_value")) or 0) >= 100,
-            (safe_int(metrics.get("bullet_count_value")) or 0) >= 100,
-            (safe_float(metrics.get("sc_total_value")) or 0.0) > 0.0,
-            (safe_float(metrics.get("total_revenue_value")) or 0.0) > 1.0,
-        ]
-    )
-
-
 def is_recent_tail_candidate_bucket(bucket: AggregateBucket) -> bool:
     if "StreamEnded" in bucket.events:
         return False
@@ -609,14 +585,6 @@ def should_suppress_recent_forwarded_end_candidate(
     return is_recent_tail_candidate_bucket(candidate_bucket)
 
 
-def should_suppress_recent_forwarded_start_candidate(
-    recent_score: tuple[int, int, int, int], candidate_bucket: AggregateBucket
-) -> bool:
-    _ = recent_score
-    _ = candidate_bucket
-    return True
-
-
 def should_replace_aggregate_bucket_event(bucket: AggregateBucket, event_type: str, existing_payload: dict[str, Any], new_payload: dict[str, Any]) -> bool:
     if bucket.group_name == "bililive_end" and event_type == "FileClosed":
         existing_duration = safe_float(get_field_value(existing_payload, "EventData.Duration")) or 0.0
@@ -627,7 +595,7 @@ def should_replace_aggregate_bucket_event(bucket: AggregateBucket, event_type: s
     return True
 
 
-def get_recent_start_suppress_window_ms(cfg: Config, bucket: AggregateBucket) -> int:
+def get_recent_start_suppress_window_ms(cfg: Config) -> int:
     return max(12 * 60 * 60 * 1000, cfg.notify_debounce_ms, cfg.aggregate_window_ms)
 
 
@@ -650,7 +618,7 @@ def remember_recent_forwarded_start(cfg: Config, notify_key: str | None, bucket:
         RECENT_FORWARDED_STARTS[notify_key] = RecentForwardedStart(
             key=notify_key,
             score=build_start_bucket_score(bucket),
-            expires_at=time.time() + get_recent_start_suppress_window_ms(cfg, bucket) / 1000,
+            expires_at=time.time() + get_recent_start_suppress_window_ms(cfg) / 1000,
         )
 
 
@@ -873,11 +841,9 @@ def merge_aggregate_bucket(target: AggregateBucket, source: AggregateBucket | No
     for request_id in source.request_ids:
         if request_id not in target.request_ids:
             target.request_ids.append(request_id)
-    target.payload_summaries.extend(source.payload_summaries)
     target.request_path = source.request_path
     target.remote_ip = source.remote_ip
     target.auth = source.auth
-    target.target = source.target
     target.computed.clear()
     return target
 
@@ -1030,7 +996,7 @@ def hold_start_after_recent_end(cfg: Config, notify_key: str, bucket: AggregateB
     return True
 
 
-def cancel_pending_start_after_end(cfg: Config, notify_key: str, *, reason: str, end_bucket: AggregateBucket | None = None) -> bool:
+def cancel_pending_start_after_end(cfg: Config, notify_key: str, *, reason: str) -> bool:
     with PENDING_START_AFTER_END_LOCK:
         pending = PENDING_START_AFTER_END_NOTIFICATIONS.pop(notify_key, None)
     if pending is None:
@@ -1053,7 +1019,7 @@ def handle_start_bucket(cfg: Config, bucket: AggregateBucket) -> None:
         return
     if notify_key:
         recent_start = get_recent_forwarded_start(notify_key)
-        if recent_start and should_suppress_recent_forwarded_start_candidate(recent_start.score, bucket):
+        if recent_start is not None:
             suppress_aggregate_bucket(cfg, bucket, reason="duplicate_start_after_recent_forwarded_start")
             return
         recent_end = get_recent_forwarded_end(notify_key)
@@ -1087,7 +1053,7 @@ def handle_end_bucket(cfg: Config, bucket: AggregateBucket) -> None:
         remember_live_session_segment(cfg, notify_key, bucket)
 
     if notify_key and is_true_bililive_end_bucket(bucket):
-        if cancel_pending_start_after_end(cfg, notify_key, reason="cancelled_by_followup_true_end", end_bucket=bucket):
+        if cancel_pending_start_after_end(cfg, notify_key, reason="cancelled_by_followup_true_end"):
             suppress_aggregate_bucket(cfg, bucket, reason="followup_true_end_cancelled_pending_reconnect_start")
             return
 
@@ -1177,7 +1143,6 @@ def queue_bililive_event(
     request_id: str,
     request_meta: dict[str, Any],
     auth: dict[str, Any],
-    payload_summary: str = "",
 ) -> dict[str, Any]:
     event_type = str(payload.get("EventType"))
     phase = event_phase(event_type)
@@ -1194,12 +1159,10 @@ def queue_bililive_event(
                 key=key,
                 phase=phase,
                 group_name=group_name,
-                group_config=default_group_config(phase),
-                created_at=time.time(),
+                event_order=default_event_order(phase),
                 request_path=request_meta.get("path", ""),
                 remote_ip=request_meta.get("remote_ip", ""),
                 auth=auth,
-                target={"private": cfg.private, "group": cfg.group},
             )
             AGGREGATE_BUCKETS[key] = bucket
             should_start_timer = window_ms > 0
@@ -1213,17 +1176,13 @@ def queue_bililive_event(
             should_replace = should_replace_aggregate_bucket_event(bucket, event_type, existing["payload"], payload)
         if should_replace:
             bucket.events[event_type] = {"request_id": request_id, "payload": payload, "ts": now_iso()}
-        if payload_summary:
-            bucket.payload_summaries.append(payload_summary)
         bucket.request_path = request_meta.get("path", "")
         bucket.remote_ip = request_meta.get("remote_ip", "")
         bucket.auth = auth
-        bucket.target = {"private": cfg.private, "group": cfg.group}
 
         if should_start_timer:
             timer = threading.Timer(window_ms / 1000, flush_aggregate_bucket, args=(cfg, key))
             timer.daemon = True
-            bucket.timer = timer
             timer.start()
 
     if should_flush_now:
@@ -1239,7 +1198,6 @@ def handle_bililive_notification(
     request_id: str,
     request_meta: dict[str, Any],
     auth: dict[str, Any],
-    payload_summary: str = "",
 ) -> HandlerResult:
-    meta = queue_bililive_event(cfg, payload, request_id=request_id, request_meta=request_meta, auth=auth, payload_summary=payload_summary)
+    meta = queue_bililive_event(cfg, payload, request_id=request_id, request_meta=request_meta, auth=auth)
     return HandlerResult(200, {"ok": True, "route": "bililive", "request_id": request_id, "aggregate": meta})

@@ -40,13 +40,8 @@ def make_config() -> Config:
 class RoutingTest(unittest.TestCase):
     def test_ito_route_has_priority_over_bililive_shape(self) -> None:
         calls = []
-        original_internal = server.handle_internal_notification
         original_bililive = server.handle_bililive_notification
         original_unknown = server.handle_unknown_notification
-
-        def fake_internal(cfg, payload, *, request_id, request_meta, auth):
-            calls.append("internal")
-            return HandlerResult(200, {"ok": True, "route": "ito"})
 
         def fake_bililive(*args, **kwargs):
             calls.append("bililive")
@@ -56,7 +51,6 @@ class RoutingTest(unittest.TestCase):
             calls.append("unknown")
             return HandlerResult(200, {"ok": True, "route": "unknown"})
 
-        server.handle_internal_notification = fake_internal
         server.handle_bililive_notification = fake_bililive
         server.handle_unknown_notification = fake_unknown
         try:
@@ -73,12 +67,13 @@ class RoutingTest(unittest.TestCase):
             }
             result = server.dispatch_notification(make_config(), payload, request_id="req", request_meta={}, auth={})
         finally:
-            server.handle_internal_notification = original_internal
             server.handle_bililive_notification = original_bililive
             server.handle_unknown_notification = original_unknown
 
         self.assertEqual(result.body["route"], "ito")
-        self.assertEqual(calls, ["internal"])
+        self.assertEqual(result.status_code, 400)
+        self.assertIn("unexpected_fields:EventData,EventType", result.body["errors"])
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

@@ -57,9 +57,13 @@ def remember_notification(notification_id: str, ttl_seconds: int) -> bool:
 
 def validate_internal_payload(payload: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    missing = sorted(REQUIRED_FIELDS - set(payload.keys()))
+    payload_keys = set(payload.keys())
+    missing = sorted(REQUIRED_FIELDS - payload_keys)
+    unexpected = sorted(payload_keys - REQUIRED_FIELDS)
     if missing:
         errors.append("missing_fields:" + ",".join(missing))
+    if unexpected:
+        errors.append("unexpected_fields:" + ",".join(unexpected))
     if not isinstance(payload.get("notification_id"), str) or not payload.get("notification_id", "").strip():
         errors.append("notification_id_invalid")
     if payload.get("program_id") != "ito":
@@ -74,6 +78,23 @@ def validate_internal_payload(payload: dict[str, Any]) -> list[str]:
         errors.append("sent_at_invalid")
     if not isinstance(payload.get("attachments"), list):
         errors.append("attachments_invalid")
+    if isinstance(payload.get("targets"), list):
+        for index, target in enumerate(payload["targets"]):
+            if not isinstance(target, dict):
+                errors.append(f"target_{index}_not_object")
+                continue
+            target_type = str(target.get("type") or "").strip().lower()
+            target_id = target.get("id")
+            target_id_text = str(target_id or "").strip()
+            if target_type not in {"user", "group"}:
+                errors.append(f"target_{index}_type_invalid")
+            if not target_id_text:
+                errors.append(f"target_{index}_id_empty")
+            else:
+                try:
+                    int(target_id_text)
+                except Exception:
+                    errors.append(f"target_{index}_id_not_numeric")
     return errors
 
 
@@ -157,7 +178,7 @@ def handle_internal_notification(
         }
         append_message_log(cfg, record)
         append_error_log(cfg, {**record, "layer": "error", "stage": "validation", "error_type": "internal_notification_invalid"})
-        return HandlerResult(400, {"ok": False, "error": "invalid internal notification", "errors": errors, "request_id": request_id})
+        return HandlerResult(400, {"ok": False, "route": "ito", "error": "invalid internal notification", "errors": errors, "request_id": request_id})
 
     notification_id = payload["notification_id"].strip()
     targets, ignored_targets = parse_internal_targets(payload.get("targets"))

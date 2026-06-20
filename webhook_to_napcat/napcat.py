@@ -38,10 +38,6 @@ class DeliveryReport:
         return sum(1 for result in self.results if result.get("ok") is False)
 
     @property
-    def ok(self) -> bool:
-        return self.attempted == 0 or self.successful > 0
-
-    @property
     def all_failed(self) -> bool:
         return self.attempted > 0 and self.successful == 0
 

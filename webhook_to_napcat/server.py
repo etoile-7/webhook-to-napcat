@@ -7,31 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from uuid import uuid4
 
-from .bililive import (
-    AggregateBucket,
-    apply_live_session_segments_to_bucket,
-    build_aggregate_context,
-    build_end_bucket_metrics,
-    build_start_bucket_score,
-    cancel_pending_start_after_end,
-    clear_live_session_segments,
-    clear_recent_forwarded_start,
-    get_bucket_field_value,
-    get_recent_forwarded_start,
-    handle_bililive_notification,
-    hold_start_after_recent_end,
-    is_bililive_notification,
-    is_meaningful_streaming_end_candidate,
-    is_recording_segment_end_bucket,
-    is_recording_segment_start_bucket,
-    is_true_bililive_end_bucket,
-    is_true_bililive_start_bucket,
-    remember_live_session_segment,
-    remember_recent_forwarded_start,
-    should_replace_aggregate_bucket_event,
-    should_suppress_recent_forwarded_end_candidate,
-    should_suppress_recent_forwarded_start_candidate,
-)
+from .bililive import handle_bililive_notification, is_bililive_notification
 from .config import Config, parse_args
 from .internal import HandlerResult, handle_internal_notification, is_internal_notification
 from .logs import append_error_log, append_request_log, eprint, sanitized_headers
@@ -139,7 +115,6 @@ def dispatch_notification(
     request_id: str,
     request_meta: dict[str, Any],
     auth: dict[str, Any],
-    payload_summary: str = "",
 ) -> HandlerResult:
     if is_internal_notification(payload):
         return handle_internal_notification(cfg, payload, request_id=request_id, request_meta=request_meta, auth=auth)
@@ -150,7 +125,6 @@ def dispatch_notification(
             request_id=request_id,
             request_meta=request_meta,
             auth=auth,
-            payload_summary=payload_summary,
         )
     return handle_unknown_notification(cfg, payload, request_id=request_id, request_meta=request_meta, auth=auth)
 
@@ -234,7 +208,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
             request_id=request_id,
             request_meta=request_meta,
             auth=auth,
-            payload_summary=request_record["request"]["payload_summary"],
         )
 
         self.send_json(result.status_code, result.body)
@@ -254,35 +227,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-__all__ = [
-    "AggregateBucket",
-    "Config",
-    "dispatch_notification",
-    "HandlerResult",
-    "apply_live_session_segments_to_bucket",
-    "build_aggregate_context",
-    "build_end_bucket_metrics",
-    "build_start_bucket_score",
-    "cancel_pending_start_after_end",
-    "clear_live_session_segments",
-    "clear_recent_forwarded_start",
-    "get_bucket_field_value",
-    "get_recent_forwarded_start",
-    "hold_start_after_recent_end",
-    "is_meaningful_streaming_end_candidate",
-    "is_recording_segment_end_bucket",
-    "is_recording_segment_start_bucket",
-    "is_true_bililive_end_bucket",
-    "is_true_bililive_start_bucket",
-    "main",
-    "parse_body",
-    "remember_live_session_segment",
-    "remember_recent_forwarded_start",
-    "sanitize_for_log",
-    "should_replace_aggregate_bucket_event",
-    "should_suppress_recent_forwarded_end_candidate",
-    "should_suppress_recent_forwarded_start_candidate",
-    "summarize_payload",
-]
