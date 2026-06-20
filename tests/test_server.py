@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import threading
 import unittest
 import urllib.error
@@ -9,38 +8,9 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from tests.helpers import make_config
 from webhook_to_napcat import server
-from webhook_to_napcat.config import Config
 from webhook_to_napcat.internal import HandlerResult
-
-
-def make_config(*, secret: str = "") -> Config:
-    return Config(
-        listen_host="127.0.0.1",
-        listen_port=0,
-        path="/webhook",
-        secret=secret,
-        napcat_base_url="http://127.0.0.1:3001",
-        napcat_token="",
-        napcat_token_mode="header",
-        private=1,
-        group=None,
-        timeout=1.0,
-        retries=0,
-        chunk_size=280,
-        log_dir="",
-        media_dir=tempfile.gettempdir(),
-        public_media_dir=tempfile.gettempdir(),
-        outbound_text_max_chars=5000,
-        aggregate_window_ms=3000,
-        notify_debounce_ms=15000,
-        live_session_segment_ttl_ms=1000,
-        post_end_start_confirm_ms=1000,
-        internal_dedupe_ttl_seconds=86400,
-        bililive_xml_base_dir="",
-        bililive_xml_strip_prefixes=(),
-        bililive_gift_price_table="",
-    )
 
 
 class ServerTest(unittest.TestCase):
@@ -51,7 +21,7 @@ class ServerTest(unittest.TestCase):
     def tearDown(self) -> None:
         server.dispatch_notification = self.original_dispatch
 
-    def run_server(self, cfg: Config):
+    def run_server(self, cfg):
         httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.WebhookHandler)
         httpd.cfg = cfg  # type: ignore[attr-defined]
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -79,7 +49,7 @@ class ServerTest(unittest.TestCase):
         server.dispatch_notification = fake_dispatch
 
     def test_health_check(self) -> None:
-        base_url = self.run_server(make_config())
+        base_url = self.run_server(make_config(listen_port=0))
         code, body = self.request(base_url + "/health")
 
         self.assertEqual(code, 200)
@@ -87,7 +57,7 @@ class ServerTest(unittest.TestCase):
 
     def test_post_wrong_path_returns_404(self) -> None:
         self.install_fake_dispatch()
-        base_url = self.run_server(make_config())
+        base_url = self.run_server(make_config(listen_port=0))
         code, body = self.request(
             base_url + "/wrong",
             method="POST",
@@ -101,7 +71,7 @@ class ServerTest(unittest.TestCase):
 
     def test_secret_rejects_missing_and_wrong_values(self) -> None:
         self.install_fake_dispatch()
-        base_url = self.run_server(make_config(secret="secret-1"))
+        base_url = self.run_server(make_config(listen_port=0, secret="secret-1"))
 
         missing_code, missing_body = self.request(
             base_url + "/webhook",
@@ -124,7 +94,7 @@ class ServerTest(unittest.TestCase):
 
     def test_secret_accepts_header_and_query_values(self) -> None:
         self.install_fake_dispatch()
-        base_url = self.run_server(make_config(secret="secret-1"))
+        base_url = self.run_server(make_config(listen_port=0, secret="secret-1"))
 
         header_code, _ = self.request(
             base_url + "/webhook",
@@ -147,7 +117,7 @@ class ServerTest(unittest.TestCase):
 
     def test_post_parses_supported_content_types(self) -> None:
         self.install_fake_dispatch()
-        base_url = self.run_server(make_config())
+        base_url = self.run_server(make_config(listen_port=0))
 
         json_code, _ = self.request(
             base_url + "/webhook",

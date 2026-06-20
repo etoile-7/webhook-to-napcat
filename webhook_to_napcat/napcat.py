@@ -133,23 +133,34 @@ def post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeou
     raise RuntimeError(f"POST failed after retries: {last}")
 
 
-def build_napcat_request(cfg: Config, target: NapCatTarget) -> tuple[str, dict[str, str], dict[str, int]]:
+def apply_napcat_auth(cfg: Config, url: str) -> tuple[str, dict[str, str]]:
+    headers: dict[str, str] = {}
+    if not cfg.napcat_token:
+        return url, headers
+    if cfg.napcat_token_mode == "header":
+        headers["Authorization"] = "Bearer " + cfg.napcat_token
+        return url, headers
+    sep = "&" if "?" in url else "?"
+    return url + sep + "access_token=" + urllib.parse.quote(cfg.napcat_token), headers
+
+
+def build_napcat_request(
+    cfg: Config,
+    target: NapCatTarget,
+    *,
+    private_endpoint: str = "/send_private_msg",
+    group_endpoint: str = "/send_group_msg",
+) -> tuple[str, dict[str, str], dict[str, int]]:
     base_url = cfg.napcat_base_url.rstrip("/")
     if target.kind == "private":
-        endpoint = "/send_private_msg"
+        endpoint = private_endpoint
         target_payload = {"user_id": int(target.id)}
     else:
-        endpoint = "/send_group_msg"
+        endpoint = group_endpoint
         target_payload = {"group_id": int(target.id)}
 
-    headers: dict[str, str] = {}
     url = base_url + endpoint
-    if cfg.napcat_token:
-        if cfg.napcat_token_mode == "header":
-            headers["Authorization"] = "Bearer " + cfg.napcat_token
-        else:
-            sep = "&" if "?" in url else "?"
-            url += sep + "access_token=" + urllib.parse.quote(cfg.napcat_token)
+    url, headers = apply_napcat_auth(cfg, url)
     return url, headers, target_payload
 
 
@@ -183,23 +194,12 @@ def send_file(cfg: Config, file_path: str, file_name: str, targets: list[NapCatT
     results: list[dict[str, Any]] = []
     for target in dedupe_targets(targets):
         try:
-            if target.kind == "private":
-                endpoint = "/upload_private_file"
-                target_payload = {"user_id": int(target.id)}
-            else:
-                endpoint = "/upload_group_file"
-                target_payload = {"group_id": int(target.id)}
-
-            base_url = cfg.napcat_base_url.rstrip("/")
-            url = base_url + endpoint
-            headers: dict[str, str] = {}
-            if cfg.napcat_token:
-                if cfg.napcat_token_mode == "header":
-                    headers["Authorization"] = "Bearer " + cfg.napcat_token
-                else:
-                    sep = "&" if "?" in url else "?"
-                    url += sep + "access_token=" + urllib.parse.quote(cfg.napcat_token)
-
+            url, headers, target_payload = build_napcat_request(
+                cfg,
+                target,
+                private_endpoint="/upload_private_file",
+                group_endpoint="/upload_group_file",
+            )
             payload = dict(target_payload)
             payload["file"] = file_path
             payload["name"] = file_name

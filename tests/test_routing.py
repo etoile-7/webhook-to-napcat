@@ -1,40 +1,10 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
 
+from tests.helpers import make_config
 from webhook_to_napcat import server
-from webhook_to_napcat.config import Config
 from webhook_to_napcat.internal import HandlerResult
-
-
-def make_config() -> Config:
-    return Config(
-        listen_host="127.0.0.1",
-        listen_port=8787,
-        path="/webhook",
-        secret="",
-        napcat_base_url="http://127.0.0.1:3001",
-        napcat_token="",
-        napcat_token_mode="header",
-        private=1,
-        group=None,
-        timeout=1.0,
-        retries=0,
-        chunk_size=280,
-        log_dir="",
-        media_dir=tempfile.gettempdir(),
-        public_media_dir=tempfile.gettempdir(),
-        outbound_text_max_chars=5000,
-        aggregate_window_ms=3000,
-        notify_debounce_ms=15000,
-        live_session_segment_ttl_ms=1000,
-        post_end_start_confirm_ms=1000,
-        internal_dedupe_ttl_seconds=86400,
-        bililive_xml_base_dir="",
-        bililive_xml_strip_prefixes=(),
-        bililive_gift_price_table="",
-    )
 
 
 class RoutingTest(unittest.TestCase):

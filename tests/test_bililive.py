@@ -2,68 +2,47 @@ from __future__ import annotations
 
 import unittest
 
-from webhook_to_napcat.bililive import (
-    AggregateBucket,
-    PENDING_END_LOCK,
-    PENDING_END_NOTIFICATIONS,
-    apply_live_session_segments_to_bucket,
+from tests.helpers import make_config
+from webhook_to_napcat.bililive_context import (
     build_aggregate_context,
     build_end_bucket_metrics,
-    cancel_pending_start_after_end,
-    clear_live_session_segments,
-    clear_recent_forwarded_start,
     get_bucket_field_value,
-    get_recent_forwarded_start,
-    handle_end_bucket,
-    hold_start_after_recent_end,
     is_recording_segment_end_bucket,
     is_recording_segment_start_bucket,
     is_true_bililive_end_bucket,
     is_true_bililive_start_bucket,
-    remember_live_session_segment,
-    remember_recent_forwarded_start,
     should_replace_aggregate_bucket_event,
     should_suppress_recent_forwarded_end_candidate,
 )
-from webhook_to_napcat.config import Config
-
-
-def make_config() -> Config:
-    return Config(
-        listen_host="127.0.0.1",
-        listen_port=8787,
-        path="/webhook",
-        secret="",
-        napcat_base_url="http://127.0.0.1:3001",
-        napcat_token="",
-        napcat_token_mode="header",
-        private=1,
-        group=None,
-        timeout=1.0,
-        retries=0,
-        chunk_size=280,
-        log_dir="",
-        media_dir="media",
-        public_media_dir="media",
-        outbound_text_max_chars=5000,
-        aggregate_window_ms=3000,
-        notify_debounce_ms=15000,
-        live_session_segment_ttl_ms=18 * 60 * 60 * 1000,
-        post_end_start_confirm_ms=10000,
-        internal_dedupe_ttl_seconds=86400,
-        bililive_xml_base_dir="",
-        bililive_xml_strip_prefixes=(),
-        bililive_gift_price_table="",
-    )
+from webhook_to_napcat.bililive_model import AggregateBucket
+from webhook_to_napcat.bililive_runtime import (
+    AGGREGATE_BUCKETS,
+    LIVE_SESSION_SEGMENTS,
+    PENDING_END_LOCK,
+    PENDING_END_NOTIFICATIONS,
+    PENDING_START_AFTER_END_LOCK,
+    PENDING_START_AFTER_END_NOTIFICATIONS,
+    RECENT_FORWARDED_STARTS,
+    apply_live_session_segments_to_bucket,
+    cancel_pending_start_after_end,
+    clear_live_session_segments,
+    clear_recent_forwarded_start,
+    get_recent_forwarded_start,
+    handle_end_bucket,
+    hold_start_after_recent_end,
+    remember_live_session_segment,
+    remember_recent_forwarded_start,
+    reset_bililive_state,
+)
+from webhook_to_napcat.bililive_xml import PRICE_TABLE_CACHE
 
 
 class BililiveTest(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_bililive_state()
+
     def tearDown(self) -> None:
-        with PENDING_END_LOCK:
-            for pending in PENDING_END_NOTIFICATIONS.values():
-                if pending.timer is not None:
-                    pending.timer.cancel()
-            PENDING_END_NOTIFICATIONS.clear()
+        reset_bililive_state()
 
     def make_end_bucket(self) -> AggregateBucket:
         return AggregateBucket(
@@ -313,6 +292,43 @@ class BililiveTest(unittest.TestCase):
         }
         recent_score = (1, 1, 1728, 4366, 402630, 1325, 1476158361)
         self.assertTrue(should_suppress_recent_forwarded_end_candidate(recent_score, bucket))
+
+    def test_reset_bililive_state_clears_memory_and_cancels_pending_timer(self) -> None:
+        cfg = make_config()
+        notify_key = "bililive:22625027:乃琳Queen:reset-test"
+        bucket = self.make_start_bucket()
+        bucket.events["StreamStarted"] = {
+            "request_id": "stream-started",
+            "payload": {
+                "EventType": "StreamStarted",
+                "EventData": {"RoomId": 22625027, "Name": "乃琳Queen", "Title": "reset-test"},
+            },
+            "ts": "t1",
+        }
+
+        self.assertTrue(hold_start_after_recent_end(cfg, notify_key, bucket, "preview"))
+        remember_recent_forwarded_start(cfg, notify_key, bucket)
+        AGGREGATE_BUCKETS["manual"] = bucket
+        LIVE_SESSION_SEGMENTS["manual"] = object()  # type: ignore[assignment]
+        PRICE_TABLE_CACHE["prices.md"] = {"礼物": 1.0}
+
+        with PENDING_START_AFTER_END_LOCK:
+            pending = PENDING_START_AFTER_END_NOTIFICATIONS.get(notify_key)
+            self.assertIsNotNone(pending)
+            assert pending is not None
+            timer = pending.timer
+
+        reset_bililive_state()
+
+        self.assertEqual(AGGREGATE_BUCKETS, {})
+        self.assertEqual(PENDING_END_NOTIFICATIONS, {})
+        self.assertEqual(PENDING_START_AFTER_END_NOTIFICATIONS, {})
+        self.assertEqual(RECENT_FORWARDED_STARTS, {})
+        self.assertEqual(LIVE_SESSION_SEGMENTS, {})
+        self.assertEqual(PRICE_TABLE_CACHE, {})
+        self.assertIsNotNone(timer)
+        assert timer is not None
+        self.assertTrue(timer.finished.is_set())
 
 
 if __name__ == "__main__":
