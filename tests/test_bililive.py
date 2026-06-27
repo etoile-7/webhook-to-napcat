@@ -252,6 +252,9 @@ class BililiveTest(unittest.TestCase):
         self.assertNotIn("互动：0", text)
         self.assertNotIn("SC数量：0", text)
         self.assertNotIn("总营收：¥0", text)
+        self.assertNotIn("舰长", text)
+        self.assertNotIn("提督", text)
+        self.assertNotIn("总督", text)
 
     def test_existing_xml_stats_are_rendered(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -260,6 +263,7 @@ class BililiveTest(unittest.TestCase):
                 '<i><d p="0,1,25,16777215,0,0,1001,0">hi</d>'
                 '<sc uid="1002" user="A" price="30" />'
                 '<gift uid="1003" user="B" giftname="小花花" giftcount="2" />'
+                '<gift uid="1005" user="D" giftname="未知礼物" giftcount="3" />'
                 '<guard uid="1004" user="C" level="3" count="1" /></i>',
                 encoding="utf-8",
             )
@@ -299,9 +303,13 @@ class BililiveTest(unittest.TestCase):
             text = build_bililive_message(bucket, cfg)
 
             self.assertIn("弹幕：1", text)
-            self.assertIn("互动：4", text)
-            self.assertIn("SC数量：1", text)
-            self.assertIn("总营收：¥171", text)
+            self.assertIn("互动人数：5｜弹幕：1", text)
+            self.assertIn("新增舰长：1", text)
+            self.assertIn("SC数量 ： 1｜ 金额：¥30", text)
+            self.assertIn("总营收（已知）：¥171", text)
+            self.assertIn("总营收（已知）：¥171\n未知礼物：未知礼物×3", text)
+            self.assertNotIn("提督：0", text)
+            self.assertNotIn("总督：0", text)
 
     def test_room_targets_override_default_targets_and_dedupe(self) -> None:
         cfg = make_config(
