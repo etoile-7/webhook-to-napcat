@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .config import Config
@@ -29,7 +30,11 @@ def get_bucket_field_value(bucket: AggregateBucket, field: str) -> Any:
 def parse_event_timestamp(value: Any) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
-    return value.strip().replace("T", " ").replace("Z", "")
+    normalized = value.strip().replace("T", " ")
+    match = re.match(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})", normalized)
+    if match:
+        return f"{match.group(1)} {match.group(2)}"
+    return normalized.replace("Z", "")
 
 
 def get_bucket_display_time(bucket: AggregateBucket, mode: str | None = None) -> str | None:

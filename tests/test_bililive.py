@@ -13,6 +13,7 @@ from webhook_to_napcat.bililive_context import (
     is_recording_segment_start_bucket,
     is_true_bililive_end_bucket,
     is_true_bililive_start_bucket,
+    parse_event_timestamp,
     should_replace_aggregate_bucket_event,
     should_suppress_recent_forwarded_end_candidate,
 )
@@ -70,6 +71,10 @@ class BililiveTest(unittest.TestCase):
             remote_ip="127.0.0.1",
             auth={},
         )
+
+    def test_event_timestamp_is_rendered_to_seconds(self) -> None:
+        self.assertEqual(parse_event_timestamp("2026-06-27T22:13:24.8352501+08:00"), "2026-06-27 22:13:24")
+        self.assertEqual(parse_event_timestamp("2026-06-27 22:13:24Z"), "2026-06-27 22:13:24")
 
     def test_weaker_tail_fileclosed_does_not_replace_main_fileclosed(self) -> None:
         bucket = self.make_end_bucket()
