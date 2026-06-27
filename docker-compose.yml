@@ -4,6 +4,7 @@ services:
     container_name: webhook-to-napcat
     pull_policy: always
     restart: unless-stopped
+    command: ["python", "-m", "webhook_to_napcat.server"]
 
     # 将 webhook 服务端口暴露到宿主机
     ports:
@@ -58,13 +59,17 @@ services:
       WEBHOOK_NOTIFY_DEBOUNCE_MS: "15000"
 
       # 可选：BililiveRecorder XML 弹幕统计配置
-      BILILIVE_XML_BASE_DIR: ""
-      BILILIVE_XML_STRIP_PREFIXES: ""
-      BILILIVE_GIFT_PRICE_TABLE: ""
+      BILILIVE_XML_BASE_DIR: "/data/zhijiang_video"
+      BILILIVE_XML_STRIP_PREFIXES: "rec/"
+      BILILIVE_GIFT_PRICE_TABLE: "/app/bilibili_gift_prices.md"
+
+      # 可选：按直播房间覆盖推送目标；default 表示使用上面的默认私聊/群聊
+      BILILIVE_TARGETS_JSON: '{"22632424":["default",{"group":162525281},{"group":1054553890}]}'
 
     volumes:
       # 将工作目录整体挂载进容器；logs / media 共用同一个目录
       - ".:/app"
+      - "/data/zhijiang_video:/data/zhijiang_video:ro"
 
     extra_hosts:
       # 让容器可以访问宿主机上运行的服务

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from dataclasses import dataclass
+from typing import Any, Union
+
+
+BililiveTargetSpec = Union[str, dict[str, int]]
 
 
 @dataclass(frozen=True)
@@ -31,6 +36,7 @@ class Config:
     bililive_xml_base_dir: str
     bililive_xml_strip_prefixes: tuple[str, ...]
     bililive_gift_price_table: str
+    bililive_targets: dict[str, tuple[BililiveTargetSpec, ...]]
 
 
 def _env_int(name: str, default: int) -> int:
@@ -54,6 +60,36 @@ def _env_target(name: str) -> int | None:
 
 def _csv_tuple(raw: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _bililive_target_spec(item: Any) -> BililiveTargetSpec:
+    if item == "default":
+        return "default"
+    if not isinstance(item, dict):
+        raise ValueError("BILILIVE_TARGETS_JSON entries must be 'default' or target objects")
+    if set(item) == {"group"}:
+        return {"group": int(item["group"])}
+    if set(item) == {"private"}:
+        return {"private": int(item["private"])}
+    raise ValueError("BILILIVE_TARGETS_JSON target objects must contain exactly group or private")
+
+
+def parse_bililive_targets_json(raw: str) -> dict[str, tuple[BililiveTargetSpec, ...]]:
+    if not raw.strip():
+        return {}
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("BILILIVE_TARGETS_JSON must be a JSON object")
+
+    result: dict[str, tuple[BililiveTargetSpec, ...]] = {}
+    for room_id, specs in data.items():
+        room_key = str(room_id).strip()
+        if not room_key:
+            raise ValueError("BILILIVE_TARGETS_JSON room id cannot be empty")
+        if not isinstance(specs, list):
+            raise ValueError("BILILIVE_TARGETS_JSON room targets must be arrays")
+        result[room_key] = tuple(_bililive_target_spec(item) for item in specs)
+    return result
 
 
 def normalize_path(path: str) -> str:
@@ -87,6 +123,7 @@ def parse_args(argv: list[str] | None = None) -> Config:
     ap.add_argument("--bililive-xml-base-dir", default=os.getenv("BILILIVE_XML_BASE_DIR", ""))
     ap.add_argument("--bililive-xml-strip-prefixes", default=os.getenv("BILILIVE_XML_STRIP_PREFIXES", ""))
     ap.add_argument("--bililive-gift-price-table", default=os.getenv("BILILIVE_GIFT_PRICE_TABLE", ""))
+    ap.add_argument("--bililive-targets-json", default=os.getenv("BILILIVE_TARGETS_JSON", ""))
     args = ap.parse_args(argv)
 
     private = args.private if args.private is not None else _env_target("NAPCAT_PRIVATE_QQ")
@@ -117,4 +154,5 @@ def parse_args(argv: list[str] | None = None) -> Config:
         bililive_xml_base_dir=args.bililive_xml_base_dir,
         bililive_xml_strip_prefixes=_csv_tuple(args.bililive_xml_strip_prefixes),
         bililive_gift_price_table=args.bililive_gift_price_table,
+        bililive_targets=parse_bililive_targets_json(args.bililive_targets_json),
     )

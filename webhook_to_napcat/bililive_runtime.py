@@ -13,6 +13,7 @@ from .bililive_context import (
     build_end_bucket_score,
     build_start_bucket_score,
     get_xml_live_stats,
+    get_bucket_field_value,
     is_end_candidate_bucket,
     is_recording_segment_end_bucket,
     is_true_bililive_end_bucket,
@@ -38,7 +39,7 @@ from .config import Config
 from .internal import HandlerResult
 from .logs import append_error_log, append_message_log, eprint
 from .media import sanitize_for_log
-from .napcat import DeliveryReport, default_targets, send_text
+from .napcat import DeliveryReport, resolve_named_targets, send_text
 from .utils import get_field_value, now_iso, safe_float, safe_int
 
 
@@ -218,6 +219,10 @@ def merge_xml_live_stats_records(records: list[dict[str, Any]]) -> dict[str, Any
                 if name_text:
                     gift_unknown[name_text] = gift_unknown.get(name_text, 0) + (safe_int(count) or 0)
 
+    if not xml_exists:
+        merged.update({"xml_path": " | ".join(xml_paths), "xml_paths": xml_paths})
+        return merged
+
     total_revenue = sums["gift_total_value"] + sums["sc_total_value"] + sums["guard_total_value"]
     gift_unknown_summary = "、".join(f"{name}×{count}" for name, count in sorted(gift_unknown.items()) if name and count)
     guard_increment_line = build_guard_increment_line(int(sums["captain_count"]), int(sums["commander_count"]), int(sums["governor_count"]))
@@ -370,14 +375,20 @@ def write_bililive_log(
         append_error_log(cfg, {**record, "layer": "error", "stage": "egress", "error_type": "bililive_forward_failed"})
 
 
+def resolve_bililive_targets(cfg: Config, bucket: AggregateBucket):
+    room_id = get_bucket_field_value(bucket, "EventData.RoomId")
+    specs = cfg.bililive_targets.get(str(room_id).strip()) if room_id not in {None, ""} else None
+    return resolve_named_targets(cfg, specs)
+
+
 def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce: dict[str, Any] | None = None) -> None:
     notify_key = build_bililive_notification_key(bucket)
     if bucket.group_name == "bililive_end" and is_true_bililive_end_bucket(bucket):
         apply_live_session_segments_to_bucket(notify_key, bucket, cfg)
     text = build_bililive_message(bucket, cfg)
-    targets = default_targets(cfg)
+    targets = resolve_bililive_targets(cfg, bucket)
     if not targets:
-        write_bililive_log(cfg, bucket, outcome="failed", reason="no default NapCat targets configured", text=text, debounce=debounce)
+        write_bililive_log(cfg, bucket, outcome="failed", reason="no Bililive NapCat targets configured", text=text, debounce=debounce)
         return
     report = send_text(cfg, text, targets)
     outcome = "failed" if report.all_failed else "forwarded"

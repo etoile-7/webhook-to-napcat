@@ -44,6 +44,7 @@ BililiveRecorder 相关配置：
 | `BILILIVE_XML_BASE_DIR` | XML 弹幕统计文件根目录，留空则不读取 XML |
 | `BILILIVE_XML_STRIP_PREFIXES` | 从录制相对路径里剥离的前缀，多个用英文逗号分隔 |
 | `BILILIVE_GIFT_PRICE_TABLE` | 礼物价格 Markdown 表路径 |
+| `BILILIVE_TARGETS_JSON` | 按房间指定直播推送目标，留空则使用默认私聊/群聊 |
 
 ito 内部通知相关配置：
 
@@ -101,6 +102,7 @@ StreamEnded
 - 下播会在等待窗口里合并 `StreamEnded` 和带统计的 `FileClosed` / `SessionEnded`。
 - 直播中录制切段不会被当成真正下播。
 - 真实下播会合并当前直播周期内的录制分段时长、大小和可读取的 XML 统计。
+- `BILILIVE_TARGETS_JSON` 可以按房间覆盖目标，例如 `{"22632424":["default",{"group":162525281},{"group":1054553890}]}`；`default` 表示继续使用 `NAPCAT_PRIVATE_QQ` / `NAPCAT_GROUP_QQ`。
 
 ### ito 内部通知
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from tests.helpers import make_config
 from webhook_to_napcat.bililive_context import (
@@ -32,9 +34,12 @@ from webhook_to_napcat.bililive_runtime import (
     hold_start_after_recent_end,
     remember_live_session_segment,
     remember_recent_forwarded_start,
+    resolve_bililive_targets,
     reset_bililive_state,
 )
+from webhook_to_napcat.bililive_message import build_bililive_message
 from webhook_to_napcat.bililive_xml import PRICE_TABLE_CACHE
+from webhook_to_napcat.config import parse_bililive_targets_json
 
 
 class BililiveTest(unittest.TestCase):
@@ -211,6 +216,135 @@ class BililiveTest(unittest.TestCase):
         self.assertIn("part1.flv", context["recording_segment_names"])
         self.assertIn("part2.flv", context["recording_segment_names"])
         clear_live_session_segments(notify_key)
+
+    def test_missing_xml_stats_are_not_rendered_as_zero(self) -> None:
+        cfg = make_config()
+        notify_key = "bililive:22632424:贝拉kira:标题"
+        bucket = self.make_end_bucket()
+        bucket.request_ids.extend(["file-closed", "stream-ended"])
+        bucket.events["FileClosed"] = {
+            "request_id": "file-closed",
+            "payload": {
+                "EventType": "FileClosed",
+                "EventData": {
+                    "RoomId": 22632424,
+                    "Name": "贝拉kira",
+                    "Title": "标题",
+                    "RelativePath": "rec/session.flv",
+                    "FileSize": 1024,
+                    "Duration": 60,
+                    "Streaming": True,
+                },
+            },
+            "ts": "t1",
+        }
+        bucket.events["StreamEnded"] = {
+            "request_id": "stream-ended",
+            "payload": {"EventType": "StreamEnded", "EventData": {"RoomId": 22632424, "Name": "贝拉kira", "Title": "标题", "Streaming": False}},
+            "ts": "t2",
+        }
+
+        self.assertIsNotNone(apply_live_session_segments_to_bucket(notify_key, bucket, cfg))
+        text = build_bililive_message(bucket, cfg)
+
+        self.assertIn("时长：1m0s", text)
+        self.assertNotIn("弹幕：0", text)
+        self.assertNotIn("互动：0", text)
+        self.assertNotIn("SC数量：0", text)
+        self.assertNotIn("总营收：¥0", text)
+
+    def test_existing_xml_stats_are_rendered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "session.xml").write_text(
+                '<i><d p="0,1,25,16777215,0,0,1001,0">hi</d>'
+                '<sc uid="1002" user="A" price="30" />'
+                '<gift uid="1003" user="B" giftname="小花花" giftcount="2" />'
+                '<guard uid="1004" user="C" level="3" count="1" /></i>',
+                encoding="utf-8",
+            )
+            price_table = root / "prices.md"
+            price_table.write_text("|礼物名|价格|\n|---|---|\n|小花花|1.5|\n|舰长|138|\n", encoding="utf-8")
+            cfg = make_config(
+                bililive_xml_base_dir=str(root),
+                bililive_xml_strip_prefixes=("rec/",),
+                bililive_gift_price_table=str(price_table),
+            )
+            notify_key = "bililive:22632424:贝拉kira:标题"
+            bucket = self.make_end_bucket()
+            bucket.request_ids.extend(["file-closed", "stream-ended"])
+            bucket.events["FileClosed"] = {
+                "request_id": "file-closed",
+                "payload": {
+                    "EventType": "FileClosed",
+                    "EventData": {
+                        "RoomId": 22632424,
+                        "Name": "贝拉kira",
+                        "Title": "标题",
+                        "RelativePath": "rec/session.flv",
+                        "FileSize": 1024,
+                        "Duration": 60,
+                        "Streaming": True,
+                    },
+                },
+                "ts": "t1",
+            }
+            bucket.events["StreamEnded"] = {
+                "request_id": "stream-ended",
+                "payload": {"EventType": "StreamEnded", "EventData": {"RoomId": 22632424, "Name": "贝拉kira", "Title": "标题", "Streaming": False}},
+                "ts": "t2",
+            }
+
+            self.assertIsNotNone(apply_live_session_segments_to_bucket(notify_key, bucket, cfg))
+            text = build_bililive_message(bucket, cfg)
+
+            self.assertIn("弹幕：1", text)
+            self.assertIn("互动：4", text)
+            self.assertIn("SC数量：1", text)
+            self.assertIn("总营收：¥171", text)
+
+    def test_room_targets_override_default_targets_and_dedupe(self) -> None:
+        cfg = make_config(
+            private=111,
+            group=222,
+            bililive_targets={
+                "22632424": (
+                    "default",
+                    {"group": 162525281},
+                    {"group": 1054553890},
+                    {"group": 222},
+                    {"private": 111},
+                )
+            },
+        )
+        bucket = self.make_start_bucket()
+        bucket.events["StreamStarted"] = {
+            "request_id": "stream-started",
+            "payload": {"EventType": "StreamStarted", "EventData": {"RoomId": 22632424, "Name": "贝拉kira", "Title": "标题"}},
+            "ts": "t1",
+        }
+
+        self.assertEqual(
+            [target.to_log() for target in resolve_bililive_targets(cfg, bucket)],
+            [{"private": 111}, {"group": 222}, {"group": 162525281}, {"group": 1054553890}],
+        )
+
+    def test_bililive_targets_json_parses_room_targets(self) -> None:
+        self.assertEqual(
+            parse_bililive_targets_json('{"22632424":["default",{"group":162525281},{"private":123}]}'),
+            {"22632424": ("default", {"group": 162525281}, {"private": 123})},
+        )
+
+    def test_unconfigured_room_uses_default_targets(self) -> None:
+        cfg = make_config(private=111, group=222, bililive_targets={"22632424": ({"group": 162525281},)})
+        bucket = self.make_start_bucket()
+        bucket.events["StreamStarted"] = {
+            "request_id": "stream-started",
+            "payload": {"EventType": "StreamStarted", "EventData": {"RoomId": 22625027, "Name": "乃琳Queen", "Title": "标题"}},
+            "ts": "t1",
+        }
+
+        self.assertEqual([target.to_log() for target in resolve_bililive_targets(cfg, bucket)], [{"private": 111}, {"group": 222}])
 
     def test_empty_streamended_merges_into_pending_stats_candidate(self) -> None:
         cfg = make_config()

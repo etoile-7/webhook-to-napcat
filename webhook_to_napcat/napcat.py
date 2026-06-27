@@ -102,6 +102,21 @@ def parse_internal_targets(raw_targets: Any) -> tuple[list[NapCatTarget], list[d
     return dedupe_targets(targets), ignored
 
 
+def resolve_named_targets(cfg: Config, specs: tuple[str | dict[str, int], ...] | None) -> list[NapCatTarget]:
+    if specs is None:
+        return default_targets(cfg)
+
+    targets: list[NapCatTarget] = []
+    for spec in specs:
+        if spec == "default":
+            targets.extend(default_targets(cfg))
+        elif isinstance(spec, dict) and "private" in spec:
+            targets.append(NapCatTarget("private", int(spec["private"])))
+        elif isinstance(spec, dict) and "group" in spec:
+            targets.append(NapCatTarget("group", int(spec["group"])))
+    return dedupe_targets(targets)
+
+
 def napcat_response_ok(response: Any) -> bool:
     if not isinstance(response, dict):
         return False
