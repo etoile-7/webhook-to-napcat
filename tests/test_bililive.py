@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import tempfile
 import unittest
 from pathlib import Path
 
 from tests.helpers import make_config
+from webhook_to_napcat import bililive_runtime
 from webhook_to_napcat.bililive_context import (
     build_aggregate_context,
     build_end_bucket_metrics,
@@ -41,6 +43,10 @@ from webhook_to_napcat.bililive_runtime import (
 from webhook_to_napcat.bililive_message import build_bililive_message
 from webhook_to_napcat.bililive_xml import PRICE_TABLE_CACHE
 from webhook_to_napcat.config import parse_bililive_targets_json
+from webhook_to_napcat.napcat import DeliveryReport
+
+
+PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5X2x8AAAAASUVORK5CYII="
 
 
 class BililiveTest(unittest.TestCase):
@@ -75,6 +81,88 @@ class BililiveTest(unittest.TestCase):
     def test_event_timestamp_is_rendered_to_seconds(self) -> None:
         self.assertEqual(parse_event_timestamp("2026-06-27T22:13:24.8352501+08:00"), "2026-06-27 22:13:24")
         self.assertEqual(parse_event_timestamp("2026-06-27 22:13:24Z"), "2026-06-27 22:13:24")
+
+    def test_start_cover_index_sends_image_segments(self) -> None:
+        original_send_segments = bililive_runtime.send_segments
+        original_send_text = bililive_runtime.send_text
+        calls: dict[str, list] = {"segments": [], "text": []}
+
+        def fake_send_segments(cfg, segments, targets):
+            calls["segments"].append((segments, [target.to_log() for target in targets]))
+            return DeliveryReport(results=[{"target": target.to_log(), "ok": True, "response": {"retcode": 0}} for target in targets], chunks=[])
+
+        def fake_send_text(cfg, text, targets):
+            calls["text"].append((text, [target.to_log() for target in targets]))
+            return DeliveryReport(results=[{"target": target.to_log(), "ok": True, "response": {"retcode": 0}} for target in targets], chunks=[text])
+
+        bililive_runtime.send_segments = fake_send_segments
+        bililive_runtime.send_text = fake_send_text
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                root = Path(tmp_dir)
+                cover_path = root / "cover.png"
+                cover_path.write_bytes(base64.b64decode(PNG_BASE64))
+                index_path = root / "index.json"
+                index_path.write_text('{"22632424":{"name":"贝拉kira","path":"' + str(cover_path) + '"}}', encoding="utf-8")
+
+                cfg = make_config(private=111, bililive_cover_index_path=str(index_path))
+                bucket = self.make_start_bucket()
+                bucket.request_ids.append("stream-started")
+                bucket.events["StreamStarted"] = {
+                    "request_id": "stream-started",
+                    "payload": {
+                        "EventType": "StreamStarted",
+                        "EventTimestamp": "2026-06-27T22:13:24+08:00",
+                        "EventData": {"RoomId": 22632424, "Name": "贝拉kira", "Title": "标题"},
+                    },
+                    "ts": "t1",
+                }
+
+                bililive_runtime.deliver_aggregate_bucket(cfg, bucket)
+        finally:
+            bililive_runtime.send_segments = original_send_segments
+            bililive_runtime.send_text = original_send_text
+
+        self.assertEqual(calls["text"], [])
+        segments, targets = calls["segments"][0]
+        self.assertEqual(targets, [{"private": 111}])
+        self.assertEqual([segment["type"] for segment in segments], ["text", "image", "text"])
+        self.assertEqual(segments[0]["data"]["text"], "🟢［贝拉kira］开播啦！")
+        self.assertTrue(segments[1]["data"]["file"].startswith("base64://"))
+        self.assertIn("标题：标题", segments[2]["data"]["text"])
+
+    def test_missing_start_cover_falls_back_to_text(self) -> None:
+        original_send_segments = bililive_runtime.send_segments
+        original_send_text = bililive_runtime.send_text
+        calls: dict[str, list] = {"segments": [], "text": []}
+
+        def fake_send_segments(cfg, segments, targets):
+            calls["segments"].append(segments)
+            return DeliveryReport(results=[{"target": target.to_log(), "ok": True, "response": {"retcode": 0}} for target in targets], chunks=[])
+
+        def fake_send_text(cfg, text, targets):
+            calls["text"].append((text, [target.to_log() for target in targets]))
+            return DeliveryReport(results=[{"target": target.to_log(), "ok": True, "response": {"retcode": 0}} for target in targets], chunks=[text])
+
+        bililive_runtime.send_segments = fake_send_segments
+        bililive_runtime.send_text = fake_send_text
+        try:
+            cfg = make_config(private=111, bililive_cover_index_path="/missing/cover-index.json")
+            bucket = self.make_start_bucket()
+            bucket.request_ids.append("stream-started")
+            bucket.events["StreamStarted"] = {
+                "request_id": "stream-started",
+                "payload": {"EventType": "StreamStarted", "EventData": {"RoomId": 22632424, "Name": "贝拉kira", "Title": "标题"}},
+                "ts": "t1",
+            }
+
+            bililive_runtime.deliver_aggregate_bucket(cfg, bucket)
+        finally:
+            bililive_runtime.send_segments = original_send_segments
+            bililive_runtime.send_text = original_send_text
+
+        self.assertEqual(calls["segments"], [])
+        self.assertIn("🟢［贝拉kira］开播啦！", calls["text"][0][0])
 
     def test_weaker_tail_fileclosed_does_not_replace_main_fileclosed(self) -> None:
         bucket = self.make_end_bucket()

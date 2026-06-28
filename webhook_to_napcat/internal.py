@@ -9,8 +9,8 @@ from typing import Any
 
 from .config import Config
 from .logs import append_error_log, append_message_log, eprint
-from .media import PersistedMedia, decode_base64_media, save_media_bytes, sanitize_for_log
-from .napcat import NapCatTarget, parse_internal_targets, send_file, send_text
+from .media import PersistedMedia, decode_base64_media, file_to_base64_uri, save_media_bytes, sanitize_for_log
+from .napcat import DeliveryReport, NapCatTarget, image_segment, parse_internal_targets, send_file, send_segments, send_text
 from .utils import now_iso, safe_int
 
 
@@ -147,12 +147,36 @@ def persist_internal_attachment(cfg: Config, attachment: Any, request_id: str, i
     return saved, None
 
 
+def failed_attachment_delivery_report(attachment: PersistedMedia, targets: list[NapCatTarget], error: str) -> dict[str, Any]:
+    report = DeliveryReport(
+        results=[{"target": target.to_log(), "ok": False, "error": error, "file": attachment.internal_path, "name": attachment.file_name} for target in targets],
+        chunks=[],
+    )
+    return {"attachment": attachment.log_summary(), **report.to_log()}
+
+
+def send_image_attachments(cfg: Config, targets: list[NapCatTarget], attachments: list[PersistedMedia]) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    for attachment in attachments:
+        image_uri = file_to_base64_uri(attachment.internal_path)
+        if image_uri is None:
+            reports.append(failed_attachment_delivery_report(attachment, targets, "image_base64_encode_failed"))
+            continue
+        report = send_segments(cfg, [image_segment(image_uri)], targets)
+        reports.append({"attachment": attachment.log_summary(), **report.to_log()})
+    return reports
+
+
 def send_file_attachments(cfg: Config, targets: list[NapCatTarget], attachments: list[PersistedMedia]) -> list[dict[str, Any]]:
     reports: list[dict[str, Any]] = []
     for attachment in attachments:
         report = send_file(cfg, attachment.public_path, attachment.file_name, targets)
         reports.append({"attachment": attachment.log_summary(), **report.to_log()})
     return reports
+
+
+def attachment_delivery_failed(report: dict[str, Any]) -> bool:
+    return int(report.get("failure_count") or 0) > 0
 
 
 def handle_internal_notification(
@@ -209,7 +233,11 @@ def handle_internal_notification(
             attachment_errors.append(error)
 
     summary_report = send_text(cfg, payload["summary"], targets) if targets else None
-    file_reports = send_file_attachments(cfg, targets, saved_attachments) if targets else []
+    image_attachments = [attachment for attachment in saved_attachments if attachment.is_image]
+    file_attachments = [attachment for attachment in saved_attachments if not attachment.is_image]
+    image_reports = send_image_attachments(cfg, targets, image_attachments) if targets else []
+    file_reports = send_file_attachments(cfg, targets, file_attachments) if targets else []
+    attachment_failure_count = len(attachment_errors) + sum(1 for report in [*image_reports, *file_reports] if attachment_delivery_failed(report))
 
     outcome = "forwarded"
     status_code = 200
@@ -218,6 +246,8 @@ def handle_internal_notification(
         status_code = 502
     elif not targets:
         outcome = "accepted_no_targets"
+    elif attachment_failure_count:
+        outcome = "partial_forwarded"
 
     message_record: dict[str, Any] = {
         "ts": now_iso(),
@@ -235,7 +265,9 @@ def handle_internal_notification(
         "summary_chars": len(payload["summary"]),
         "attachments": [attachment.log_summary() for attachment in saved_attachments],
         "attachment_errors": attachment_errors,
+        "image_reports": image_reports,
         "file_reports": file_reports,
+        "attachment_failure_count": attachment_failure_count,
     }
     if summary_report is not None:
         message_record.update(summary_report.to_log())
@@ -255,6 +287,25 @@ def handle_internal_notification(
                 "auth": auth,
                 "target": message_record["target"],
                 "napcat": message_record.get("napcat", []),
+            },
+        )
+    elif attachment_failure_count:
+        append_error_log(
+            cfg,
+            {
+                "ts": now_iso(),
+                "request_id": request_id,
+                "layer": "error",
+                "route": "ito",
+                "stage": "attachment",
+                "error_type": "attachment_forward_failed",
+                "request": request_meta,
+                "auth": auth,
+                "target": message_record["target"],
+                "notification_id": notification_id,
+                "attachment_errors": attachment_errors,
+                "image_reports": image_reports,
+                "file_reports": file_reports,
             },
         )
 
@@ -280,5 +331,6 @@ def handle_internal_notification(
             "deliveries": 0 if summary_report is None else summary_report.attempted,
             "attachments": len(saved_attachments),
             "attachment_errors": len(attachment_errors),
+            "attachment_failures": attachment_failure_count,
         },
     )

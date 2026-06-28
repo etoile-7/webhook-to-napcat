@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 import threading
 import time
 from typing import Any
@@ -38,8 +39,8 @@ from .bililive_xml import PRICE_TABLE_CACHE, build_guard_increment_line, empty_x
 from .config import Config
 from .internal import HandlerResult
 from .logs import append_error_log, append_message_log, eprint
-from .media import sanitize_for_log
-from .napcat import DeliveryReport, resolve_named_targets, send_text
+from .media import file_to_base64_uri, sanitize_for_log
+from .napcat import DeliveryReport, image_segment, resolve_named_targets, send_segments, send_text
 from .utils import get_field_value, now_iso, safe_float, safe_int
 
 
@@ -350,6 +351,7 @@ def write_bililive_log(
     text: str | None = None,
     delivery: DeliveryReport | None = None,
     debounce: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     record: dict[str, Any] = {
         "ts": now_iso(),
@@ -370,6 +372,8 @@ def write_bililive_log(
         record["debounce"] = debounce
     if delivery is not None:
         record.update(delivery.to_log())
+    if extra:
+        record.update(sanitize_for_log(extra))
     append_message_log(cfg, record)
     if outcome == "failed":
         append_error_log(cfg, {**record, "layer": "error", "stage": "egress", "error_type": "bililive_forward_failed"})
@@ -381,6 +385,79 @@ def resolve_bililive_targets(cfg: Config, bucket: AggregateBucket):
     return resolve_named_targets(cfg, specs)
 
 
+def resolve_bililive_cover_path(cfg: Config, room_id: Any) -> tuple[str | None, dict[str, Any]]:
+    index_path = str(cfg.bililive_cover_index_path or "").strip()
+    meta: dict[str, Any] = {"included": False}
+    if not index_path:
+        meta["reason"] = "cover_index_not_configured"
+        return None, meta
+
+    room_key = str(room_id or "").strip()
+    meta["room_id"] = room_key
+    meta["index_path"] = index_path
+    if not room_key:
+        meta["reason"] = "room_id_empty"
+        return None, meta
+
+    try:
+        with Path(index_path).open("r", encoding="utf-8") as f:
+            index = json.load(f)
+    except FileNotFoundError:
+        meta["reason"] = "cover_index_missing"
+        return None, meta
+    except Exception as exc:
+        meta["reason"] = "cover_index_read_failed"
+        meta["error"] = str(exc)
+        return None, meta
+
+    record = index.get(room_key) if isinstance(index, dict) else None
+    if not isinstance(record, dict):
+        meta["reason"] = "cover_room_not_found"
+        return None, meta
+
+    raw_path = str(record.get("path") or "").strip()
+    if not raw_path:
+        meta["reason"] = "cover_path_empty"
+        return None, meta
+
+    cover_path = Path(raw_path)
+    candidates = [cover_path] if cover_path.is_absolute() else [Path.cwd() / cover_path, Path(index_path).parent / cover_path]
+    for candidate in candidates:
+        if candidate.exists():
+            resolved = str(candidate)
+            meta.update({"path": resolved, "name": record.get("name")})
+            return resolved, meta
+
+    meta["reason"] = "cover_file_missing"
+    meta["path"] = str(candidates[0])
+    return None, meta
+
+
+def build_bililive_start_segments(cfg: Config, bucket: AggregateBucket, text: str) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+    if bucket.group_name != "bililive_start":
+        return None, None
+
+    room_id = get_bucket_field_value(bucket, "EventData.RoomId")
+    cover_path, meta = resolve_bililive_cover_path(cfg, room_id)
+    if cover_path is None:
+        return None, meta
+
+    image_uri = file_to_base64_uri(cover_path)
+    if image_uri is None:
+        meta["reason"] = "cover_base64_encode_failed"
+        return None, meta
+
+    first_line, sep, rest = text.strip().partition("\n")
+    segments: list[dict[str, Any]] = []
+    if first_line.strip():
+        segments.append({"type": "text", "data": {"text": first_line.strip()}})
+    segments.append(image_segment(image_uri))
+    if sep and rest.strip():
+        segments.append({"type": "text", "data": {"text": rest.strip()}})
+    meta["included"] = True
+    return segments, meta
+
+
 def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce: dict[str, Any] | None = None) -> None:
     notify_key = build_bililive_notification_key(bucket)
     if bucket.group_name == "bililive_end" and is_true_bililive_end_bucket(bucket):
@@ -390,9 +467,30 @@ def deliver_aggregate_bucket(cfg: Config, bucket: AggregateBucket, debounce: dic
     if not targets:
         write_bililive_log(cfg, bucket, outcome="failed", reason="no Bililive NapCat targets configured", text=text, debounce=debounce)
         return
-    report = send_text(cfg, text, targets)
+
+    segments, cover_meta = build_bililive_start_segments(cfg, bucket, text)
+    extra: dict[str, Any] = {"message_mode": "text"}
+    if cover_meta is not None:
+        extra["cover"] = cover_meta
+    if segments:
+        report = send_segments(cfg, segments, targets)
+        extra["message_mode"] = "segments"
+        if report.all_failed:
+            fallback_report = send_text(cfg, text, targets)
+            extra.update(
+                {
+                    "message_mode": "text",
+                    "used_fallback": True,
+                    "fallback_reason": "cover_segments_all_failed",
+                    "cover_delivery": report.to_log(),
+                }
+            )
+            report = fallback_report
+    else:
+        report = send_text(cfg, text, targets)
+
     outcome = "failed" if report.all_failed else "forwarded"
-    write_bililive_log(cfg, bucket, outcome=outcome, text=text, delivery=report, debounce=debounce)
+    write_bililive_log(cfg, bucket, outcome=outcome, text=text, delivery=report, debounce=debounce, extra=extra)
     if report.all_failed:
         return
     if bucket.group_name == "bililive_start":

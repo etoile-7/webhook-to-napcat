@@ -48,7 +48,7 @@ class NapCatTest(unittest.TestCase):
         self.assertFalse(report.all_failed)
         self.assertEqual(calls[0]["url"], "http://127.0.0.1:3001/upload_group_file?access_token=token/file")
         self.assertEqual(calls[0]["headers"], {})
-        self.assertEqual(calls[0]["payload"], {"group_id": 456, "file": "/tmp/result.txt", "name": "result.txt"})
+        self.assertEqual(calls[0]["payload"], {"group_id": 456, "file": "file:///tmp/result.txt", "name": "result.txt"})
 
 
 if __name__ == "__main__":

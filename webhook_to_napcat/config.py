@@ -36,6 +36,7 @@ class Config:
     bililive_xml_base_dir: str
     bililive_xml_strip_prefixes: tuple[str, ...]
     bililive_gift_price_table: str
+    bililive_cover_index_path: str
     bililive_targets: dict[str, tuple[BililiveTargetSpec, ...]]
 
 
@@ -123,6 +124,7 @@ def parse_args(argv: list[str] | None = None) -> Config:
     ap.add_argument("--bililive-xml-base-dir", default=os.getenv("BILILIVE_XML_BASE_DIR", ""))
     ap.add_argument("--bililive-xml-strip-prefixes", default=os.getenv("BILILIVE_XML_STRIP_PREFIXES", ""))
     ap.add_argument("--bililive-gift-price-table", default=os.getenv("BILILIVE_GIFT_PRICE_TABLE", ""))
+    ap.add_argument("--bililive-cover-index-path", default=os.getenv("BILILIVE_COVER_INDEX_PATH", ""))
     ap.add_argument("--bililive-targets-json", default=os.getenv("BILILIVE_TARGETS_JSON", ""))
     args = ap.parse_args(argv)
 
@@ -154,5 +156,6 @@ def parse_args(argv: list[str] | None = None) -> Config:
         bililive_xml_base_dir=args.bililive_xml_base_dir,
         bililive_xml_strip_prefixes=_csv_tuple(args.bililive_xml_strip_prefixes),
         bililive_gift_price_table=args.bililive_gift_price_table,
+        bililive_cover_index_path=args.bililive_cover_index_path,
         bililive_targets=parse_bililive_targets_json(args.bililive_targets_json),
     )

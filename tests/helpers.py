@@ -31,6 +31,7 @@ def make_config(
     bililive_xml_base_dir: str = "",
     bililive_xml_strip_prefixes: tuple[str, ...] = (),
     bililive_gift_price_table: str = "",
+    bililive_cover_index_path: str = "",
     bililive_targets: dict[str, tuple[str | dict[str, int], ...]] | None = None,
 ) -> Config:
     media_root = media_dir if media_dir is not None else tempfile.gettempdir()
@@ -60,5 +61,6 @@ def make_config(
         bililive_xml_base_dir=bililive_xml_base_dir,
         bililive_xml_strip_prefixes=bililive_xml_strip_prefixes,
         bililive_gift_price_table=bililive_gift_price_table,
+        bililive_cover_index_path=bililive_cover_index_path,
         bililive_targets=bililive_targets or {},
     )

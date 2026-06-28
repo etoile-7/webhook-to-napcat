@@ -187,6 +187,16 @@ def detect_mime_type(data: bytes) -> str | None:
     return None
 
 
+def file_to_base64_uri(path: str) -> str | None:
+    try:
+        data = Path(path).read_bytes()
+    except Exception:
+        return None
+    if not data:
+        return None
+    return "base64://" + base64.b64encode(data).decode("ascii")
+
+
 def safe_path_component(value: Any, default: str = "asset") -> str:
     raw = str(value or "").strip()
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip(".-_")

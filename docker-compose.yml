@@ -47,9 +47,9 @@ services:
       # 消息日志目录（容器内），会把每次 webhook 请求/转发结果写成 JSONL
       WEBHOOK_LOG_DIR: "/app/logs"
 
-      # base64 附件在容器内的保存目录，以及写入消息/日志里的宿主机路径前缀
+      # base64 附件在容器内的保存目录，以及传给 NapCat 的容器内可见路径前缀
       WEBHOOK_MEDIA_DIR: "/app/media"
-      WEBHOOK_PUBLIC_MEDIA_DIR: "/opt/WebhookToNapcat/media"
+      WEBHOOK_PUBLIC_MEDIA_DIR: "/app/up/webhook-to-napcat"
 
       # 长消息拆分时，单条 QQ 消息的最大长度
       QQ_CHUNK_SIZE: "280"
@@ -62,6 +62,7 @@ services:
       BILILIVE_XML_BASE_DIR: "/data/zhijiang_video"
       BILILIVE_XML_STRIP_PREFIXES: "rec/"
       BILILIVE_GIFT_PRICE_TABLE: "/app/bilibili_gift_prices.md"
+      BILILIVE_COVER_INDEX_PATH: "/app/cover/index.json"
 
       # 可选：按直播房间覆盖推送目标；default 表示使用上面的默认私聊/群聊
       BILILIVE_TARGETS_JSON: '{"22632424":["default",{"group":162525281},{"group":1054553890}]}'
@@ -69,6 +70,8 @@ services:
     volumes:
       # 将工作目录整体挂载进容器；logs / media 共用同一个目录
       - ".:/app"
+      # 让 webhook 保存的附件同时出现在 NapCat 容器的 /app/up/webhook-to-napcat
+      - "/data/qq_file/up/webhook-to-napcat:/app/media"
       - "/data/zhijiang_video:/data/zhijiang_video:ro"
 
     extra_hosts:

@@ -205,8 +205,17 @@ def send_text(cfg: Config, text: str, targets: list[NapCatTarget]) -> DeliveryRe
     return DeliveryReport(results=results, chunks=chunks)
 
 
+def file_upload_uri(file_path: str) -> str:
+    text = str(file_path or "").strip()
+    lowered = text.lower()
+    if lowered.startswith(("http://", "https://", "file://", "base64://", "data:")):
+        return text
+    return "file://" + text
+
+
 def send_file(cfg: Config, file_path: str, file_name: str, targets: list[NapCatTarget]) -> DeliveryReport:
     results: list[dict[str, Any]] = []
+    upload_file = file_upload_uri(file_path)
     for target in dedupe_targets(targets):
         try:
             url, headers, target_payload = build_napcat_request(
@@ -216,13 +225,13 @@ def send_file(cfg: Config, file_path: str, file_name: str, targets: list[NapCatT
                 group_endpoint="/upload_group_file",
             )
             payload = dict(target_payload)
-            payload["file"] = file_path
+            payload["file"] = upload_file
             payload["name"] = file_name
             response = post_json(url, payload, headers=headers, timeout=cfg.timeout, retries=cfg.retries)
             ok = napcat_response_ok(response)
-            results.append({"target": target.to_log(), "ok": ok, "response": response, "file": file_path, "name": file_name})
+            results.append({"target": target.to_log(), "ok": ok, "response": response, "file": upload_file, "name": file_name})
         except Exception as exc:
-            results.append({"target": target.to_log(), "ok": False, "error": str(exc), "file": file_path, "name": file_name})
+            results.append({"target": target.to_log(), "ok": False, "error": str(exc), "file": upload_file, "name": file_name})
     return DeliveryReport(results=results, chunks=[])
 
 

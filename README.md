@@ -31,7 +31,7 @@
 | `WEBHOOK_OUTBOUND_TEXT_MAX_CHARS` | 单条入站通知最多转发的文本长度，默认 `5000` |
 | `WEBHOOK_LOG_DIR` | JSONL 日志目录，默认 `/logs` |
 | `WEBHOOK_MEDIA_DIR` | base64 附件在服务内的保存目录，默认 `/app/media` |
-| `WEBHOOK_PUBLIC_MEDIA_DIR` | 写入消息和日志里的媒体路径前缀，默认 `/opt/WebhookToNapcat/media` |
+| `WEBHOOK_PUBLIC_MEDIA_DIR` | 传给 NapCat 的媒体路径前缀，默认 `/opt/WebhookToNapcat/media` |
 
 BililiveRecorder 相关配置：
 
@@ -44,6 +44,7 @@ BililiveRecorder 相关配置：
 | `BILILIVE_XML_BASE_DIR` | XML 弹幕统计文件根目录，留空则不读取 XML |
 | `BILILIVE_XML_STRIP_PREFIXES` | 从录制相对路径里剥离的前缀，多个用英文逗号分隔 |
 | `BILILIVE_GIFT_PRICE_TABLE` | 礼物价格 Markdown 表路径 |
+| `BILILIVE_COVER_INDEX_PATH` | 开播封面索引路径，留空则不发送封面 |
 | `BILILIVE_TARGETS_JSON` | 按房间指定直播推送目标，留空则使用默认私聊/群聊 |
 
 ito 内部通知相关配置：
@@ -125,7 +126,7 @@ attachments
 - 用 `notification_id` 做短期去重。
 - `targets` 里的 `user` 转 QQ 私聊，`group` 转 QQ 群。
 - 只把 `summary` 当正文发给用户。
-- 如果有 `attachments`，会在 `summary` 发送后先保存附件，再作为 QQ 文件发送。
+- 如果有 `attachments`，会在 `summary` 发送后先保存附件；图片作为 QQ 图片发送，其他附件作为 QQ 文件发送。
 - 附件发送失败不会影响 `summary` 的发送结果，只会记录到日志。
 
 ### 未知通知
