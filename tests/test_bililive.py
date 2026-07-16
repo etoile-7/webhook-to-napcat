@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +36,7 @@ from webhook_to_napcat.bililive_runtime import (
     get_recent_forwarded_start,
     handle_end_bucket,
     hold_start_after_recent_end,
+    remember_live_session_open_segment,
     remember_live_session_segment,
     remember_recent_forwarded_start,
     resolve_bililive_targets,
@@ -309,6 +311,102 @@ class BililiveTest(unittest.TestCase):
         self.assertIn("part1.flv", context["recording_segment_names"])
         self.assertIn("part2.flv", context["recording_segment_names"])
         clear_live_session_segments(notify_key)
+
+    def test_later_fileopening_recovers_previous_unclosed_segment_from_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            rec_dir = root / "2026年07月16日" / "贝拉kira"
+            rec_dir.mkdir(parents=True)
+            first_rel = "rec/2026年07月16日/贝拉kira/11.51.23【贝拉kira】2026.07.16 【突击】终末地1.4主线！ 直播录像.flv"
+            second_rel = "rec/2026年07月16日/贝拉kira/16.33.35【贝拉kira】2026.07.16 【突击】终末地1.4主线！ 直播录像.flv"
+            first_file = root / first_rel.removeprefix("rec/")
+            first_file.write_bytes(b"x" * 1234)
+            first_file.with_suffix(".xml").write_text('<i><d p="0,1,25,16777215,0,0,1001,0">hi</d></i>', encoding="utf-8")
+            opened_at = bililive_runtime.parse_event_timestamp_epoch({"EventTimestamp": "2026-07-16T11:51:23+08:00"})
+            assert opened_at is not None
+            os.utime(first_file, (opened_at + 120, opened_at + 120))
+
+            cfg = make_config(bililive_xml_base_dir=str(root), bililive_xml_strip_prefixes=("rec/",))
+            notify_key = "bililive:22632424:贝拉kira:【突击】终末地1.4主线！"
+
+            first_open = self.make_start_bucket()
+            first_open.request_ids.append("first-open")
+            first_open.events["FileOpening"] = {
+                "request_id": "first-open",
+                "payload": {
+                    "EventType": "FileOpening",
+                    "EventTimestamp": "2026-07-16T11:51:23+08:00",
+                    "EventData": {"RoomId": 22632424, "Name": "贝拉kira", "Title": "【突击】终末地1.4主线！", "RelativePath": first_rel, "Streaming": True, "Recording": True},
+                },
+                "ts": "t1",
+            }
+            self.assertTrue(remember_live_session_open_segment(cfg, notify_key, first_open))
+
+            second_open = self.make_start_bucket()
+            second_open.request_ids.append("second-open")
+            second_open.events["FileOpening"] = {
+                "request_id": "second-open",
+                "payload": {
+                    "EventType": "FileOpening",
+                    "EventTimestamp": "2026-07-16T16:33:35+08:00",
+                    "EventData": {"RoomId": 22632424, "Name": "贝拉kira", "Title": "【突击】终末地1.4主线！", "RelativePath": second_rel, "Streaming": True, "Recording": True},
+                },
+                "ts": "t2",
+            }
+            self.assertTrue(remember_live_session_open_segment(cfg, notify_key, second_open))
+
+            final = self.make_end_bucket()
+            final.request_ids.extend(["second-close", "stream-ended"])
+            final.events["FileClosed"] = {
+                "request_id": "second-close",
+                "payload": {
+                    "EventType": "FileClosed",
+                    "EventData": {"RoomId": 22632424, "Name": "贝拉kira", "Title": "【突击】终末地1.4主线！", "RelativePath": second_rel, "FileSize": 2000, "Duration": 60, "Streaming": True},
+                },
+                "ts": "t3",
+            }
+            final.events["StreamEnded"] = {
+                "request_id": "stream-ended",
+                "payload": {"EventType": "StreamEnded", "EventData": {"RoomId": 22632424, "Name": "贝拉kira", "Title": "【突击】终末地1.4主线！", "Streaming": False}},
+                "ts": "t4",
+            }
+
+            self.assertIsNotNone(apply_live_session_segments_to_bucket(notify_key, final, cfg))
+            context = build_aggregate_context(final, cfg)
+            self.assertEqual(context["recording_segment_count"], 2)
+            self.assertAlmostEqual(context["duration_seconds"], 180, delta=1)
+            self.assertEqual(context["file_size_bytes"], 3234)
+            self.assertIn("11.51.23", context["recording_segment_names"])
+            self.assertIn("16.33.35", context["recording_segment_names"])
+            self.assertEqual(context["bullet_count_value"], 1)
+
+    def test_current_open_segment_is_not_recovered_without_later_opening(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = make_config(bililive_xml_base_dir=str(root), bililive_xml_strip_prefixes=("rec/",))
+            notify_key = "bililive:22632424:贝拉kira:tail"
+            tail_open = self.make_start_bucket()
+            tail_open.request_ids.append("tail-open")
+            tail_open.events["FileOpening"] = {
+                "request_id": "tail-open",
+                "payload": {
+                    "EventType": "FileOpening",
+                    "EventTimestamp": "2026-07-16T17:08:41+08:00",
+                    "EventData": {"RoomId": 22632424, "Name": "贝拉kira", "Title": "tail", "RelativePath": "rec/tail.flv", "Streaming": True, "Recording": True},
+                },
+                "ts": "t1",
+            }
+            self.assertTrue(remember_live_session_open_segment(cfg, notify_key, tail_open))
+
+            stream_only = self.make_end_bucket()
+            stream_only.request_ids.append("stream-ended")
+            stream_only.events["StreamEnded"] = {
+                "request_id": "stream-ended",
+                "payload": {"EventType": "StreamEnded", "EventData": {"RoomId": 22632424, "Name": "贝拉kira", "Title": "tail", "Streaming": False}},
+                "ts": "t2",
+            }
+
+            self.assertIsNone(apply_live_session_segments_to_bucket(notify_key, stream_only, cfg))
 
     def test_missing_xml_stats_are_not_rendered_as_zero(self) -> None:
         cfg = make_config()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime
 import json
 from pathlib import Path
 import threading
@@ -17,6 +18,7 @@ from .bililive_context import (
     get_bucket_field_value,
     is_end_candidate_bucket,
     is_recording_segment_end_bucket,
+    is_recording_segment_start_bucket,
     is_true_bililive_end_bucket,
     is_true_bililive_start_bucket,
     should_replace_aggregate_bucket_event,
@@ -35,7 +37,7 @@ from .bililive_model import (
     default_event_order,
     event_phase,
 )
-from .bililive_xml import PRICE_TABLE_CACHE, build_guard_increment_line, empty_xml_stats, format_count_k, format_money, get_file_name
+from .bililive_xml import PRICE_TABLE_CACHE, build_guard_increment_line, compute_xml_live_stats, derive_xml_path, empty_xml_stats, format_count_k, format_money, get_file_name
 from .config import Config
 from .internal import HandlerResult
 from .logs import append_error_log, append_message_log, eprint
@@ -56,6 +58,8 @@ RECENT_END_LOCK = threading.Lock()
 RECENT_FORWARDED_ENDS: dict[str, "RecentForwardedEnd"] = {}
 LIVE_SESSION_SEGMENT_LOCK = threading.Lock()
 LIVE_SESSION_SEGMENTS: dict[str, "LiveSessionSegmentAccumulator"] = {}
+ACTIVE_OPEN_SEGMENT_LOCK = threading.Lock()
+ACTIVE_OPEN_SEGMENTS: dict[str, dict[str, Any]] = {}
 
 
 def reset_bililive_state() -> None:
@@ -82,6 +86,8 @@ def reset_bililive_state() -> None:
         RECENT_FORWARDED_ENDS.clear()
     with LIVE_SESSION_SEGMENT_LOCK:
         LIVE_SESSION_SEGMENTS.clear()
+    with ACTIVE_OPEN_SEGMENT_LOCK:
+        ACTIVE_OPEN_SEGMENTS.clear()
     PRICE_TABLE_CACHE.clear()
 
 
@@ -160,6 +166,29 @@ def cleanup_expired_live_session_segments(now_ts: float | None = None) -> None:
             LIVE_SESSION_SEGMENTS.pop(key, None)
 
 
+def parse_event_timestamp_epoch(payload: dict[str, Any]) -> float | None:
+    raw = get_field_value(payload, "EventTimestamp")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        text = raw.strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(text).timestamp()
+    except Exception:
+        return None
+
+
+def derive_media_path(relative_path: str, cfg: Config | None = None) -> Path | None:
+    if cfg is None or not cfg.bililive_xml_base_dir:
+        return None
+    normalized = relative_path.strip().replace("\\", "/")
+    for prefix in cfg.bililive_xml_strip_prefixes:
+        prefix_text = str(prefix).strip().replace("\\", "/")
+        if prefix_text and normalized.startswith(prefix_text):
+            normalized = normalized[len(prefix_text) :].lstrip("/")
+            break
+    return Path(cfg.bililive_xml_base_dir) / normalized
+
+
 def build_live_session_segment_record(bucket: AggregateBucket, cfg: Config | None = None) -> dict[str, Any] | None:
     event = bucket.events.get("FileClosed")
     payload = event.get("payload") if isinstance(event, dict) else None
@@ -181,6 +210,102 @@ def build_live_session_segment_record(bucket: AggregateBucket, cfg: Config | Non
         "request_ids": list(bucket.request_ids),
         "created_at": time.time(),
     }
+
+
+def build_live_session_open_segment_record(bucket: AggregateBucket) -> dict[str, Any] | None:
+    event = bucket.events.get("FileOpening")
+    payload = event.get("payload") if isinstance(event, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    relative_path = get_field_value(payload, "EventData.RelativePath")
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        return None
+    return {
+        "segment_id": relative_path,
+        "relative_path": relative_path,
+        "file_name": get_file_name(relative_path),
+        "duration_seconds": None,
+        "file_size_bytes": None,
+        "xml_live_stats": empty_xml_stats(),
+        "request_ids": list(bucket.request_ids),
+        "created_at": time.time(),
+        "opened_at_epoch": parse_event_timestamp_epoch(payload),
+        "source": "file_opening",
+    }
+
+
+def materialize_live_session_segment_record(record: dict[str, Any], cfg: Config | None = None) -> dict[str, Any]:
+    materialized = copy.deepcopy(record)
+    relative_path = str(materialized.get("relative_path") or "")
+    if relative_path and cfg is not None and cfg.bililive_xml_base_dir:
+        media_path = derive_media_path(relative_path, cfg)
+        if media_path is not None:
+            try:
+                stat = media_path.stat()
+            except FileNotFoundError:
+                stat = None
+            except Exception as exc:
+                eprint(f"[bililive-disk-segment-stat-error] {media_path}: {exc}")
+                stat = None
+            if stat is not None:
+                if safe_int(materialized.get("file_size_bytes")) is None:
+                    materialized["file_size_bytes"] = stat.st_size
+                if safe_float(materialized.get("duration_seconds")) is None:
+                    opened_at = safe_float(materialized.get("opened_at_epoch"))
+                    if opened_at is not None and stat.st_mtime >= opened_at:
+                        materialized["duration_seconds"] = stat.st_mtime - opened_at
+        xml_path = derive_xml_path(relative_path, cfg.bililive_xml_base_dir, cfg.bililive_xml_strip_prefixes)
+        materialized["xml_live_stats"] = compute_xml_live_stats(xml_path, cfg.bililive_gift_price_table)
+    return materialized
+
+
+def remember_live_session_record(cfg: Config, notify_key: str | None, record: dict[str, Any] | None) -> bool:
+    if not notify_key or record is None:
+        return False
+    now_ts = time.time()
+    cleanup_expired_live_session_segments(now_ts)
+    with LIVE_SESSION_SEGMENT_LOCK:
+        acc = LIVE_SESSION_SEGMENTS.get(notify_key)
+        if acc is None or acc.expires_at <= now_ts:
+            acc = LiveSessionSegmentAccumulator(key=notify_key, expires_at=now_ts + cfg.live_session_segment_ttl_ms / 1000)
+            LIVE_SESSION_SEGMENTS[notify_key] = acc
+        else:
+            acc.expires_at = max(acc.expires_at, now_ts + cfg.live_session_segment_ttl_ms / 1000)
+        acc.segments[str(record["segment_id"])] = record
+    return True
+
+
+def clear_active_open_segment(notify_key: str | None, relative_path: Any = None) -> None:
+    if not notify_key:
+        return
+    relative_text = str(relative_path or "")
+    with ACTIVE_OPEN_SEGMENT_LOCK:
+        current = ACTIVE_OPEN_SEGMENTS.get(notify_key)
+        if current is None:
+            return
+        if not relative_text or str(current.get("relative_path") or "") == relative_text:
+            ACTIVE_OPEN_SEGMENTS.pop(notify_key, None)
+
+
+def remember_live_session_open_segment(cfg: Config, notify_key: str | None, bucket: AggregateBucket) -> bool:
+    if not notify_key:
+        return False
+    record = build_live_session_open_segment_record(bucket)
+    if record is None:
+        return False
+
+    previous: dict[str, Any] | None = None
+    with ACTIVE_OPEN_SEGMENT_LOCK:
+        current = ACTIVE_OPEN_SEGMENTS.get(notify_key)
+        if current is not None and str(current.get("relative_path") or "") != str(record.get("relative_path") or ""):
+            previous = copy.deepcopy(current)
+        ACTIVE_OPEN_SEGMENTS[notify_key] = record
+
+    if previous is not None:
+        recovered = materialize_live_session_segment_record(previous, cfg)
+        recovered["source"] = "recovered_from_previous_file_opening"
+        remember_live_session_record(cfg, notify_key, recovered)
+    return True
 
 
 def merge_xml_live_stats_records(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -266,22 +391,11 @@ def merge_xml_live_stats_records(records: list[dict[str, Any]]) -> dict[str, Any
 
 
 def remember_live_session_segment(cfg: Config, notify_key: str | None, bucket: AggregateBucket) -> bool:
-    if not notify_key:
-        return False
     record = build_live_session_segment_record(bucket, cfg)
-    if record is None:
-        return False
-    now_ts = time.time()
-    cleanup_expired_live_session_segments(now_ts)
-    with LIVE_SESSION_SEGMENT_LOCK:
-        acc = LIVE_SESSION_SEGMENTS.get(notify_key)
-        if acc is None or acc.expires_at <= now_ts:
-            acc = LiveSessionSegmentAccumulator(key=notify_key, expires_at=now_ts + cfg.live_session_segment_ttl_ms / 1000)
-            LIVE_SESSION_SEGMENTS[notify_key] = acc
-        else:
-            acc.expires_at = max(acc.expires_at, now_ts + cfg.live_session_segment_ttl_ms / 1000)
-        acc.segments[str(record["segment_id"])] = record
-    return True
+    stored = remember_live_session_record(cfg, notify_key, record)
+    if stored and record is not None:
+        clear_active_open_segment(notify_key, record.get("relative_path"))
+    return stored
 
 
 def clear_live_session_segments(notify_key: str | None) -> None:
@@ -289,6 +403,7 @@ def clear_live_session_segments(notify_key: str | None) -> None:
         return
     with LIVE_SESSION_SEGMENT_LOCK:
         LIVE_SESSION_SEGMENTS.pop(notify_key, None)
+    clear_active_open_segment(notify_key)
 
 
 def apply_live_session_segments_to_bucket(notify_key: str | None, bucket: AggregateBucket, cfg: Config | None = None) -> dict[str, Any] | None:
@@ -297,10 +412,11 @@ def apply_live_session_segments_to_bucket(notify_key: str | None, bucket: Aggreg
     cleanup_expired_live_session_segments()
     with LIVE_SESSION_SEGMENT_LOCK:
         acc = LIVE_SESSION_SEGMENTS.get(notify_key)
-        records_by_id = copy.deepcopy(acc.segments) if acc is not None else {}
+        raw_records_by_id = copy.deepcopy(acc.segments) if acc is not None else {}
+    records_by_id = {key: materialize_live_session_segment_record(record, cfg) for key, record in raw_records_by_id.items()}
     current = build_live_session_segment_record(bucket, cfg)
     if current is not None:
-        records_by_id[str(current["segment_id"])] = current
+        records_by_id[str(current["segment_id"])] = materialize_live_session_segment_record(current, cfg)
     records = list(records_by_id.values())
     if not records:
         return None
@@ -576,6 +692,8 @@ def cancel_pending_start_after_end(cfg: Config, notify_key: str, *, reason: str)
 def handle_start_bucket(cfg: Config, bucket: AggregateBucket) -> None:
     notify_key = build_bililive_notification_key(bucket)
     if not is_true_bililive_start_bucket(bucket):
+        if notify_key and is_recording_segment_start_bucket(bucket):
+            remember_live_session_open_segment(cfg, notify_key, bucket)
         suppress_aggregate_bucket(cfg, bucket, reason="recording_segment_start_without_streamstarted")
         return
     if notify_key:
