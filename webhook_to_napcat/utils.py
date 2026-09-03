@@ -21,38 +21,6 @@ def safe_int(value: Any) -> int | None:
         return None
 
 
-def safe_float(value: Any) -> float | None:
-    try:
-        if value in {None, ""}:
-            return None
-        return float(value)
-    except Exception:
-        return None
-
-
-def safe_bool(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "yes", "y", "on"}:
-            return True
-        if lowered in {"0", "false", "no", "n", "off"}:
-            return False
-    return None
-
-
-def get_field_value(payload: Any, field: str) -> Any:
-    current = payload
-    for part in field.split("."):
-        if not isinstance(current, dict) or part not in current:
-            return None
-        current = current[part]
-    return current
-
-
 def compact_json(value: Any, *, indent: int | None = None) -> str:
     return json.dumps(value, ensure_ascii=False, indent=indent)
 

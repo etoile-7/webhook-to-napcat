@@ -33,7 +33,7 @@ class UnknownNotificationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
             result = unknown.handle_unknown_notification(
-                make_config(media_dir=media_dir, public_media_dir=public_dir, live_session_segment_ttl_ms=1000, post_end_start_confirm_ms=1000),
+                make_config(media_dir=media_dir, public_media_dir=public_dir),
                 {"event": "test", "status": "ok"},
                 request_id="req-1",
                 request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"},
@@ -61,7 +61,7 @@ class UnknownNotificationTest(unittest.TestCase):
         payload = {"event": "upload", "image_base64": PNG_BASE64}
         with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
             result = unknown.handle_unknown_notification(
-                make_config(media_dir=media_dir, public_media_dir=public_dir, live_session_segment_ttl_ms=1000, post_end_start_confirm_ms=1000),
+                make_config(media_dir=media_dir, public_media_dir=public_dir),
                 payload,
                 request_id="req-2",
                 request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"},
@@ -76,7 +76,7 @@ class UnknownNotificationTest(unittest.TestCase):
     def test_unknown_without_default_target_fails(self) -> None:
         with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
             result = unknown.handle_unknown_notification(
-                make_config(media_dir=media_dir, public_media_dir=public_dir, private=None, live_session_segment_ttl_ms=1000, post_end_start_confirm_ms=1000),
+                make_config(media_dir=media_dir, public_media_dir=public_dir, private=None),
                 {"event": "test"},
                 request_id="req-3",
                 request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"},

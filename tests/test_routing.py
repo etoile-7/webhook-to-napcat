@@ -8,21 +8,13 @@ from webhook_to_napcat.internal import HandlerResult
 
 
 class RoutingTest(unittest.TestCase):
-    def test_ito_route_has_priority_over_bililive_shape(self) -> None:
-        calls = []
-        original_bililive = server.handle_bililive_notification
+    def test_ito_route_has_priority_over_generic_fallback(self) -> None:
         original_unknown = server.handle_unknown_notification
 
-        def fake_bililive(*args, **kwargs):
-            calls.append("bililive")
-            return HandlerResult(200, {"ok": True, "route": "bililive"})
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("ito payload must not use generic fallback")
 
-        def fake_unknown(*args, **kwargs):
-            calls.append("unknown")
-            return HandlerResult(200, {"ok": True, "route": "unknown"})
-
-        server.handle_bililive_notification = fake_bililive
-        server.handle_unknown_notification = fake_unknown
+        server.handle_unknown_notification = fail_if_called
         try:
             payload = {
                 "notification_id": "ito:test",
@@ -37,13 +29,34 @@ class RoutingTest(unittest.TestCase):
             }
             result = server.dispatch_notification(make_config(), payload, request_id="req", request_meta={}, auth={})
         finally:
-            server.handle_bililive_notification = original_bililive
             server.handle_unknown_notification = original_unknown
 
         self.assertEqual(result.body["route"], "ito")
         self.assertEqual(result.status_code, 400)
         self.assertIn("unexpected_fields:EventData,EventType", result.body["errors"])
-        self.assertEqual(calls, [])
+
+    def test_recorder_shape_falls_back_to_generic_forwarding(self) -> None:
+        calls = []
+        original_unknown = server.handle_unknown_notification
+
+        def fake_unknown(*args, **kwargs):
+            calls.append(kwargs)
+            return HandlerResult(200, {"ok": True, "route": "unknown"})
+
+        server.handle_unknown_notification = fake_unknown
+        try:
+            result = server.dispatch_notification(
+                make_config(),
+                {"EventType": "StreamStarted", "EventData": {"RoomId": 1, "Name": "主播"}},
+                request_id="req-recorder",
+                request_meta={},
+                auth={},
+            )
+        finally:
+            server.handle_unknown_notification = original_unknown
+
+        self.assertEqual(result.body["route"], "unknown")
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

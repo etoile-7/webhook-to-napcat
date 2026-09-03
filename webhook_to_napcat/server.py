@@ -7,7 +7,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from uuid import uuid4
 
-from .bililive import handle_bililive_notification, is_bililive_notification
 from .config import Config, parse_args
 from .internal import HandlerResult, handle_internal_notification, is_internal_notification
 from .logs import append_error_log, append_request_log, eprint, sanitized_headers
@@ -118,14 +117,6 @@ def dispatch_notification(
 ) -> HandlerResult:
     if is_internal_notification(payload):
         return handle_internal_notification(cfg, payload, request_id=request_id, request_meta=request_meta, auth=auth)
-    if is_bililive_notification(payload):
-        return handle_bililive_notification(
-            cfg,
-            payload,
-            request_id=request_id,
-            request_meta=request_meta,
-            auth=auth,
-        )
     return handle_unknown_notification(cfg, payload, request_id=request_id, request_meta=request_meta, auth=auth)
 
 

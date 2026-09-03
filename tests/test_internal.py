@@ -42,7 +42,7 @@ class InternalNotificationTest(unittest.TestCase):
     def test_rejects_missing_required_fields(self) -> None:
         with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
             result = internal.handle_internal_notification(
-                make_config(media_dir=media_dir, public_media_dir=public_dir, live_session_segment_ttl_ms=1000, post_end_start_confirm_ms=1000),
+                make_config(media_dir=media_dir, public_media_dir=public_dir),
                 {"program_id": "ito"},
                 request_id="req-1",
                 request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"},
@@ -57,7 +57,7 @@ class InternalNotificationTest(unittest.TestCase):
         payload["EventType"] = "StreamStarted"
         with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
             result = internal.handle_internal_notification(
-                make_config(media_dir=media_dir, public_media_dir=public_dir, live_session_segment_ttl_ms=1000, post_end_start_confirm_ms=1000),
+                make_config(media_dir=media_dir, public_media_dir=public_dir),
                 payload,
                 request_id="req-extra",
                 request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"},
@@ -72,7 +72,7 @@ class InternalNotificationTest(unittest.TestCase):
         payload["targets"] = [{"type": "channel", "id": "789"}]
         with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
             result = internal.handle_internal_notification(
-                make_config(media_dir=media_dir, public_media_dir=public_dir, live_session_segment_ttl_ms=1000, post_end_start_confirm_ms=1000),
+                make_config(media_dir=media_dir, public_media_dir=public_dir),
                 payload,
                 request_id="req-target-type",
                 request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"},
@@ -87,7 +87,7 @@ class InternalNotificationTest(unittest.TestCase):
         payload["targets"] = [{"type": "user", "id": "user-001"}]
         with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
             result = internal.handle_internal_notification(
-                make_config(media_dir=media_dir, public_media_dir=public_dir, live_session_segment_ttl_ms=1000, post_end_start_confirm_ms=1000),
+                make_config(media_dir=media_dir, public_media_dir=public_dir),
                 payload,
                 request_id="req-target-id",
                 request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"},
@@ -121,7 +121,7 @@ class InternalNotificationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
             result = internal.handle_internal_notification(
-                make_config(media_dir=media_dir, public_media_dir=public_dir, live_session_segment_ttl_ms=1000, post_end_start_confirm_ms=1000),
+                make_config(media_dir=media_dir, public_media_dir=public_dir),
                 self.payload(),
                 request_id="req-2",
                 request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"},
@@ -161,7 +161,7 @@ class InternalNotificationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
             result = internal.handle_internal_notification(
-                make_config(media_dir=media_dir, public_media_dir=public_dir, live_session_segment_ttl_ms=1000, post_end_start_confirm_ms=1000),
+                make_config(media_dir=media_dir, public_media_dir=public_dir),
                 payload,
                 request_id="req-file",
                 request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"},
@@ -186,7 +186,7 @@ class InternalNotificationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir, tempfile.TemporaryDirectory() as log_dir:
             result = internal.handle_internal_notification(
-                make_config(media_dir=media_dir, public_media_dir=public_dir, log_dir=log_dir, live_session_segment_ttl_ms=1000, post_end_start_confirm_ms=1000),
+                make_config(media_dir=media_dir, public_media_dir=public_dir, log_dir=log_dir),
                 self.payload(),
                 request_id="req-partial",
                 request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"},
@@ -217,7 +217,7 @@ class InternalNotificationTest(unittest.TestCase):
         internal.send_file = lambda cfg, file_path, file_name, targets: DeliveryReport(results=[], chunks=[])
 
         with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
-            cfg = make_config(media_dir=media_dir, public_media_dir=public_dir, live_session_segment_ttl_ms=1000, post_end_start_confirm_ms=1000)
+            cfg = make_config(media_dir=media_dir, public_media_dir=public_dir)
             first = internal.handle_internal_notification(cfg, self.payload(), request_id="req-3", request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"}, auth={})
             second = internal.handle_internal_notification(cfg, self.payload(), request_id="req-4", request_meta={"path": "/webhook", "remote_ip": "127.0.0.1"}, auth={})
 
