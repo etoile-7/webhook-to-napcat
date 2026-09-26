@@ -23,7 +23,6 @@ class Config:
     media_dir: str
     public_media_dir: str
     outbound_text_max_chars: int
-    internal_dedupe_ttl_seconds: int
 
 
 def _env_int(name: str, default: int) -> int:
@@ -68,7 +67,6 @@ def parse_args(argv: list[str] | None = None) -> Config:
     ap.add_argument("--media-dir", default=os.getenv("WEBHOOK_MEDIA_DIR", "/app/media"))
     ap.add_argument("--public-media-dir", default=os.getenv("WEBHOOK_PUBLIC_MEDIA_DIR", "/opt/WebhookToNapcat/media"))
     ap.add_argument("--outbound-text-max-chars", type=int, default=_env_int("WEBHOOK_OUTBOUND_TEXT_MAX_CHARS", 5000))
-    ap.add_argument("--internal-dedupe-ttl-seconds", type=int, default=_env_int("WEBHOOK_INTERNAL_DEDUPE_TTL_SECONDS", 24 * 60 * 60))
     args = ap.parse_args(argv)
 
     private = args.private if args.private is not None else _env_target("NAPCAT_PRIVATE_QQ")
@@ -91,5 +89,4 @@ def parse_args(argv: list[str] | None = None) -> Config:
         media_dir=args.media_dir,
         public_media_dir=args.public_media_dir,
         outbound_text_max_chars=max(0, args.outbound_text_max_chars),
-        internal_dedupe_ttl_seconds=max(0, args.internal_dedupe_ttl_seconds),
     )

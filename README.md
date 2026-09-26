@@ -32,11 +32,10 @@
 | `WEBHOOK_MEDIA_DIR` | base64 附件在服务内的保存目录，默认 `/app/media` |
 | `WEBHOOK_PUBLIC_MEDIA_DIR` | 传给 NapCat 的媒体路径前缀，默认 `/opt/WebhookToNapcat/media` |
 
-ito 内部通知相关配置：
-
-| 环境变量 | 说明 |
-|---|---|
-| `WEBHOOK_INTERNAL_DEDUPE_TTL_SECONDS` | `notification_id` 内存去重时间，默认 24 小时 |
+ito 内部通知的投递回执保存在 `WEBHOOK_MEDIA_DIR/delivery/receipts.sqlite`。
+请持久挂载整个媒体目录。回执不会按时间自动过期；删除该目录会丢失去重依据。
+内部通知逐目标、逐文本分段记录结果，不使用 `NAPCAT_RETRIES` 进行盲目重发。
+`WEBHOOK_OUTBOUND_TEXT_MAX_CHARS` 不截断内部通知的完整摘要。
 
 ## Docker Compose
 
@@ -87,7 +86,7 @@ attachments
 
 转发规则很简单：
 
-- 用 `notification_id` 做短期去重。
+- 用 `notification_id` 和完整请求内容指纹持久去重；相同 ID 携带不同内容返回 409。
 - `targets` 里的 `user` 转 QQ 私聊，`group` 转 QQ 群。
 - 只把 `summary` 当正文发给用户。
 - 如果有 `attachments`，会在 `summary` 发送后先保存附件；图片作为 QQ 图片发送，其他附件作为 QQ 文件发送。
@@ -128,3 +127,23 @@ curl -X POST 'http://127.0.0.1:8787/webhook' \
   -H 'Content-Type: application/json' \
   -d '{"event":"test","status":"ok"}'
 ```
+
+## 内部通知投递回执与人工核实
+
+正文所有目标、所有分段均由 NapCat 确认后返回 `200/state=forwarded`。
+已确认步骤不会随重试再次发送；明确失败返回 502，发送端可用原请求重试。
+空目标返回 `200/state=accepted_no_targets`、`ok=false`，不代表送达。
+附件失败单独计数，不撤销已成功正文，不触发正文重发。
+
+下游超时或进程在发送中退出，无法判断 QQ 是否已收到，返回
+`409/state=uncertain`。先核对 QQ/NapCat 记录，再用本地工具记录核实结果：
+
+```bash
+python -m webhook_to_napcat.receipts --media-dir /app/media --notification-id 'ito:example'
+python -m webhook_to_napcat.receipts --media-dir /app/media --notification-id 'ito:example' --step 'text:private:123:0' --outcome delivered --evidence '已核对QQ消息记录'
+```
+
+仅在确认未发送时使用 `--outcome not-delivered`。工具不发消息，只保存核实结果，
+随后由发送端重试同一通知。无法核实时保持 uncertain；不要删除回执绕过去重。
+`delivered` 表示外部发送已确认，不表示用户已阅读。操作记录持久保存到同一数据库。
+详见 `通知系统Webhook规范.md` 的响应约定。

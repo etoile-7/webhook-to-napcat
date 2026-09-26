@@ -15,7 +15,6 @@ PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAw
 
 class InternalNotificationTest(unittest.TestCase):
     def setUp(self) -> None:
-        internal.SEEN_NOTIFICATIONS.clear()
         self.original_send_text = internal.send_text
         self.original_send_file = internal.send_file
         self.original_send_segments = internal.send_segments
@@ -24,7 +23,6 @@ class InternalNotificationTest(unittest.TestCase):
         internal.send_text = self.original_send_text
         internal.send_file = self.original_send_file
         internal.send_segments = self.original_send_segments
-        internal.SEEN_NOTIFICATIONS.clear()
 
     def payload(self) -> dict:
         return {
@@ -131,12 +129,12 @@ class InternalNotificationTest(unittest.TestCase):
 
         self.assertEqual(result.status_code, 200)
         self.assertEqual(calls["text"][0][0], "ITO\n状态：完成")
-        self.assertEqual(calls["text"][0][1], [{"private": 123}, {"group": 456}])
+        self.assertEqual([c[1][0] for c in calls["text"]], [{"private": 123}, {"group": 456}])
         self.assertEqual(calls["images"][0][0][0]["type"], "image")
         self.assertTrue(calls["images"][0][0][0]["data"]["file"].startswith("base64://"))
-        self.assertEqual(calls["images"][0][1], [{"private": 123}, {"group": 456}])
+        self.assertEqual([c[1][0] for c in calls["images"]], [{"private": 123}, {"group": 456}])
         self.assertEqual(calls["files"], [])
-        self.assertEqual(calls["order"], ["summary", "image"])
+        self.assertEqual(calls["order"], ["summary", "summary", "image", "image"])
         self.assertTrue(saved_files)
 
     def test_sends_non_image_attachment_as_file(self) -> None:
@@ -170,9 +168,9 @@ class InternalNotificationTest(unittest.TestCase):
 
         self.assertEqual(result.status_code, 200)
         self.assertEqual(calls["files"][0][1], "result.txt")
-        self.assertEqual(calls["files"][0][2], [{"private": 123}, {"group": 456}])
+        self.assertEqual([c[2][0] for c in calls["files"]], [{"private": 123}, {"group": 456}])
         self.assertEqual(calls["images"], [])
-        self.assertEqual(calls["order"], ["summary", "file"])
+        self.assertEqual(calls["order"], ["summary", "summary", "file", "file"])
 
     def test_attachment_failure_is_logged_as_partial_forwarded(self) -> None:
         def fake_send_text(cfg, text, targets):
@@ -200,9 +198,9 @@ class InternalNotificationTest(unittest.TestCase):
                 error_rows.extend(json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
 
         self.assertEqual(result.status_code, 200)
-        self.assertEqual(result.body["attachment_failures"], 1)
-        self.assertEqual(message_rows[-1]["outcome"], "partial_forwarded")
-        self.assertEqual(message_rows[-1]["attachment_failure_count"], 1)
+        self.assertEqual(result.body["attachment_failures"], 2)
+        self.assertEqual(message_rows[-1]["state"], "forwarded")
+        self.assertEqual(message_rows[-1]["attachment_failures"], 2)
         self.assertEqual(error_rows[-1]["error_type"], "attachment_forward_failed")
 
     def test_duplicate_notification_is_accepted_without_resending(self) -> None:
@@ -214,7 +212,7 @@ class InternalNotificationTest(unittest.TestCase):
             return DeliveryReport(results=[{"target": target.to_log(), "ok": True, "response": {"retcode": 0}} for target in targets], chunks=[text])
 
         internal.send_text = fake_send_text
-        internal.send_file = lambda cfg, file_path, file_name, targets: DeliveryReport(results=[], chunks=[])
+        internal.send_segments = lambda cfg, segments, targets: DeliveryReport(results=[{"ok": True}], chunks=[])
 
         with tempfile.TemporaryDirectory() as media_dir, tempfile.TemporaryDirectory() as public_dir:
             cfg = make_config(media_dir=media_dir, public_media_dir=public_dir)
@@ -224,7 +222,7 @@ class InternalNotificationTest(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
         self.assertTrue(second.body["duplicate"])
-        self.assertEqual(send_count, 1)
+        self.assertEqual(send_count, 2)
 
 
 if __name__ == "__main__":

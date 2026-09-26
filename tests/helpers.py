@@ -23,7 +23,6 @@ def make_config(
     media_dir: str | None = None,
     public_media_dir: str | None = None,
     outbound_text_max_chars: int = 5000,
-    internal_dedupe_ttl_seconds: int = 86400,
 ) -> Config:
     media_root = media_dir if media_dir is not None else tempfile.gettempdir()
     public_root = public_media_dir if public_media_dir is not None else media_root
@@ -44,5 +43,4 @@ def make_config(
         media_dir=media_root,
         public_media_dir=public_root,
         outbound_text_max_chars=outbound_text_max_chars,
-        internal_dedupe_ttl_seconds=internal_dedupe_ttl_seconds,
     )

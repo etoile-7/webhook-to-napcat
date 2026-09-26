@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import threading
-import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from typing import Any
 
 from .config import Config
-from .logs import append_error_log, append_message_log, eprint
+from .logs import append_error_log, append_message_log
 from .media import PersistedMedia, decode_base64_media, file_to_base64_uri, save_media_bytes, sanitize_for_log
-from .napcat import DeliveryReport, NapCatTarget, image_segment, parse_internal_targets, send_file, send_segments, send_text
-from .utils import now_iso, safe_int
+from .napcat import image_segment, parse_internal_targets, send_file, send_segments, send_text
+from .utils import now_iso, safe_int, split_text_for_qq
+from .delivery_store import DeliveryBusy, DeliveryConflict, DeliveryStore
 
 
 REQUIRED_FIELDS = {
@@ -23,8 +22,6 @@ REQUIRED_FIELDS = {
     "sent_at",
     "attachments",
 }
-DEDUP_LOCK = threading.Lock()
-SEEN_NOTIFICATIONS: dict[str, float] = {}
 
 
 @dataclass(frozen=True)
@@ -35,24 +32,6 @@ class HandlerResult:
 
 def is_internal_notification(payload: Any) -> bool:
     return isinstance(payload, dict) and payload.get("program_id") == "ito"
-
-
-def cleanup_seen_notifications(now_ts: float | None = None) -> None:
-    now_ts = time.time() if now_ts is None else now_ts
-    with DEDUP_LOCK:
-        for key in [key for key, expires_at in SEEN_NOTIFICATIONS.items() if expires_at <= now_ts]:
-            SEEN_NOTIFICATIONS.pop(key, None)
-
-
-def remember_notification(notification_id: str, ttl_seconds: int) -> bool:
-    now_ts = time.time()
-    cleanup_seen_notifications(now_ts)
-    with DEDUP_LOCK:
-        expires_at = SEEN_NOTIFICATIONS.get(notification_id)
-        if expires_at is not None and expires_at > now_ts:
-            return False
-        SEEN_NOTIFICATIONS[notification_id] = now_ts + max(0, ttl_seconds)
-    return True
 
 
 def validate_internal_payload(payload: dict[str, Any]) -> list[str]:
@@ -76,6 +55,12 @@ def validate_internal_payload(payload: dict[str, Any]) -> list[str]:
         errors.append("summary_invalid")
     if not isinstance(payload.get("sent_at"), str) or not payload.get("sent_at", "").strip():
         errors.append("sent_at_invalid")
+    try:
+        stamp = datetime.fromisoformat(str(payload.get('sent_at', '')).replace('Z', '+00:00'))
+        if stamp.utcoffset() != timedelta(0):
+            errors.append('sent_at_not_utc')
+    except ValueError:
+        errors.append('sent_at_invalid')
     if not isinstance(payload.get("attachments"), list):
         errors.append("attachments_invalid")
     if isinstance(payload.get("targets"), list):
@@ -91,9 +76,7 @@ def validate_internal_payload(payload: dict[str, Any]) -> list[str]:
             if not target_id_text:
                 errors.append(f"target_{index}_id_empty")
             else:
-                try:
-                    int(target_id_text)
-                except Exception:
+                if not target_id_text.isascii() or not target_id_text.isdigit() or int(target_id_text) <= 0:
                     errors.append(f"target_{index}_id_not_numeric")
     return errors
 
@@ -147,38 +130,6 @@ def persist_internal_attachment(cfg: Config, attachment: Any, request_id: str, i
     return saved, None
 
 
-def failed_attachment_delivery_report(attachment: PersistedMedia, targets: list[NapCatTarget], error: str) -> dict[str, Any]:
-    report = DeliveryReport(
-        results=[{"target": target.to_log(), "ok": False, "error": error, "file": attachment.internal_path, "name": attachment.file_name} for target in targets],
-        chunks=[],
-    )
-    return {"attachment": attachment.log_summary(), **report.to_log()}
-
-
-def send_image_attachments(cfg: Config, targets: list[NapCatTarget], attachments: list[PersistedMedia]) -> list[dict[str, Any]]:
-    reports: list[dict[str, Any]] = []
-    for attachment in attachments:
-        image_uri = file_to_base64_uri(attachment.internal_path)
-        if image_uri is None:
-            reports.append(failed_attachment_delivery_report(attachment, targets, "image_base64_encode_failed"))
-            continue
-        report = send_segments(cfg, [image_segment(image_uri)], targets)
-        reports.append({"attachment": attachment.log_summary(), **report.to_log()})
-    return reports
-
-
-def send_file_attachments(cfg: Config, targets: list[NapCatTarget], attachments: list[PersistedMedia]) -> list[dict[str, Any]]:
-    reports: list[dict[str, Any]] = []
-    for attachment in attachments:
-        report = send_file(cfg, attachment.public_path, attachment.file_name, targets)
-        reports.append({"attachment": attachment.log_summary(), **report.to_log()})
-    return reports
-
-
-def attachment_delivery_failed(report: dict[str, Any]) -> bool:
-    return int(report.get("failure_count") or 0) > 0
-
-
 def handle_internal_notification(
     cfg: Config,
     payload: dict[str, Any],
@@ -204,133 +155,94 @@ def handle_internal_notification(
         append_error_log(cfg, {**record, "layer": "error", "stage": "validation", "error_type": "internal_notification_invalid"})
         return HandlerResult(400, {"ok": False, "route": "ito", "error": "invalid internal notification", "errors": errors, "request_id": request_id})
 
-    notification_id = payload["notification_id"].strip()
-    targets, ignored_targets = parse_internal_targets(payload.get("targets"))
+    store = DeliveryStore(cfg.media_dir)
+    try:
+        with store.claim(payload) as prior:
+            if prior is not None:
+                return HandlerResult(200, {**prior, "duplicate": True})
+            return _forward_durable(cfg, payload, store, request_id)
+    except DeliveryBusy:
+        return HandlerResult(503, {"ok": False, "state": "in_progress", "request_id": request_id})
+    except DeliveryConflict:
+        return HandlerResult(409, {"ok": False, "state": "identity_conflict", "request_id": request_id})
+    finally:
+        store.close()
 
-    if not remember_notification(notification_id, cfg.internal_dedupe_ttl_seconds):
-        append_message_log(
-            cfg,
-            {
-                "ts": now_iso(),
-                "request_id": request_id,
-                "layer": "message",
-                "route": "ito",
-                "outcome": "duplicate",
-                "notification_id": notification_id,
-                "request": request_meta,
-                "auth": auth,
-            },
-        )
-        return HandlerResult(200, {"ok": True, "duplicate": True, "request_id": request_id})
 
-    saved_attachments: list[PersistedMedia] = []
-    attachment_errors: list[dict[str, Any]] = []
-    for index, attachment in enumerate(payload.get("attachments") or []):
-        saved, error = persist_internal_attachment(cfg, attachment, request_id, index)
-        if saved is not None:
-            saved_attachments.append(saved)
-        if error is not None:
-            attachment_errors.append(error)
+def _forward_durable(cfg, payload, store, request_id):
+    key = payload["notification_id"]
+    targets, _ = parse_internal_targets(payload["targets"])
+    # A transport timeout may mean QQ already accepted the message. Do not
+    # blindly replay an uncertain downstream side effect inside post_json.
+    outbound = replace(cfg, retries=0)
+    chunks = store.text_plan(key, split_text_for_qq(payload["summary"], cfg.chunk_size, outbound_limit=0))
+    counts = {"confirmed": 0, "failed": 0, "uncertain": 0}
 
-    summary_report = send_text(cfg, payload["summary"], targets) if targets else None
-    image_attachments = [attachment for attachment in saved_attachments if attachment.is_image]
-    file_attachments = [attachment for attachment in saved_attachments if not attachment.is_image]
-    image_reports = send_image_attachments(cfg, targets, image_attachments) if targets else []
-    file_reports = send_file_attachments(cfg, targets, file_attachments) if targets else []
-    attachment_failure_count = len(attachment_errors) + sum(1 for report in [*image_reports, *file_reports] if attachment_delivery_failed(report))
+    def deliver(step, send):
+        state = store.state(key, step)
+        if state == "confirmed":
+            return state
+        if state == "uncertain":
+            return state
+        store.set_state(key, step, "sending")
+        try:
+            report = send()
+            state = ("confirmed" if report.results and all(r.get("ok") is True for r in report.results)
+                     else "uncertain" if not report.results or any(r.get("error") for r in report.results)
+                     else "failed")
+        except Exception:
+            state = "uncertain"
+        store.set_state(key, step, state)
+        return state
 
-    outcome = "forwarded"
-    status_code = 200
-    if summary_report is not None and summary_report.all_failed:
-        outcome = "failed"
-        status_code = 502
-    elif not targets:
-        outcome = "accepted_no_targets"
-    elif attachment_failure_count:
-        outcome = "partial_forwarded"
+    for target in targets:
+        for index, chunk in enumerate(chunks):
+            step = f"text:{target.kind}:{target.id}:{index}"
+            state = deliver(step, lambda: send_text(outbound, chunk, [target]))
+            counts[state] += 1
+            if state != "confirmed":
+                # Preserve order within a target; other targets still proceed.
+                break
 
-    message_record: dict[str, Any] = {
-        "ts": now_iso(),
-        "request_id": request_id,
-        "layer": "message",
-        "route": "ito",
-        "outcome": outcome,
-        "notification_id": notification_id,
-        "program_name": payload.get("program_name"),
-        "sent_at": payload.get("sent_at"),
-        "request": request_meta,
-        "auth": auth,
-        "target": [target.to_log() for target in targets],
-        "ignored_targets": ignored_targets,
-        "summary_chars": len(payload["summary"]),
-        "attachments": [attachment.log_summary() for attachment in saved_attachments],
-        "attachment_errors": attachment_errors,
-        "image_reports": image_reports,
-        "file_reports": file_reports,
-        "attachment_failure_count": attachment_failure_count,
-    }
-    if summary_report is not None:
-        message_record.update(summary_report.to_log())
-    append_message_log(cfg, message_record)
+    attachment_failures = 0
+    # Text is always attempted before attachment decoding or sending.
+    if targets and counts["failed"] == 0 and counts["uncertain"] == 0:
+        for index, attachment in enumerate(payload["attachments"]):
+            try:
+                saved, error = persist_internal_attachment(cfg, attachment, request_id, index)
+            except Exception:
+                saved, error = None, {"error": "attachment_preparation_failed"}
+            if error or saved is None:
+                attachment_failures += 1
+                continue
+            for target in targets:
+                step = f"attachment:{target.kind}:{target.id}:{index}"
+                if saved.is_image:
+                    uri = file_to_base64_uri(saved.internal_path)
+                    if uri is None:
+                        attachment_failures += 1
+                        continue
+                    send = lambda: send_segments(outbound, [image_segment(uri)], [target])
+                else:
+                    send = lambda: send_file(outbound, saved.public_path, saved.file_name, [target])
+                if deliver(step, send) != "confirmed":
+                    attachment_failures += 1
 
-    if status_code >= 500:
-        append_error_log(
-            cfg,
-            {
-                "ts": now_iso(),
-                "request_id": request_id,
-                "layer": "error",
-                "route": "ito",
-                "stage": "egress",
-                "error_type": "forward_failed",
-                "request": request_meta,
-                "auth": auth,
-                "target": message_record["target"],
-                "napcat": message_record.get("napcat", []),
-            },
-        )
-    elif attachment_failure_count:
-        append_error_log(
-            cfg,
-            {
-                "ts": now_iso(),
-                "request_id": request_id,
-                "layer": "error",
-                "route": "ito",
-                "stage": "attachment",
-                "error_type": "attachment_forward_failed",
-                "request": request_meta,
-                "auth": auth,
-                "target": message_record["target"],
-                "notification_id": notification_id,
-                "attachment_errors": attachment_errors,
-                "image_reports": image_reports,
-                "file_reports": file_reports,
-            },
-        )
-
-    eprint(
-        json.dumps(
-            {
-                "event": "internal_notification_handled",
-                "outcome": outcome,
-                "notification_id": notification_id,
-                "targets": len(targets),
-                "request_id": request_id,
-            },
-            ensure_ascii=False,
-        )
-    )
-    return HandlerResult(
-        status_code,
-        {
-            "ok": status_code < 500,
-            "route": "ito",
-            "request_id": request_id,
-            "targets": len(targets),
-            "deliveries": 0 if summary_report is None else summary_report.attempted,
-            "attachments": len(saved_attachments),
-            "attachment_errors": len(attachment_errors),
-            "attachment_failures": attachment_failure_count,
-        },
-    )
+    state = ("accepted_no_targets" if not targets else
+             "uncertain" if counts["uncertain"] else
+             "partial" if counts["failed"] and counts["confirmed"] else
+             "failed" if counts["failed"] else "forwarded")
+    status = 409 if state == "uncertain" else 502 if counts["failed"] else 200
+    body = {"ok": state == "forwarded", "state": state, "route": "ito",
+            "request_id": request_id, "targets": len(targets),
+            "deliveries": counts["confirmed"], "text_confirmed": counts["confirmed"],
+            "text_failed": counts["failed"], "text_uncertain": counts["uncertain"],
+            "attachments": len(payload["attachments"]),
+            "attachment_failures": attachment_failures}
+    if state in {"forwarded", "accepted_no_targets"}:
+        store.finish(key, body)
+    record = {"ts": now_iso(), "notification_id": key, **body}
+    append_message_log(cfg, record)
+    if status != 200 or attachment_failures:
+        append_error_log(cfg, {**record, "error_type": "attachment_forward_failed" if attachment_failures else "forward_failed"})
+    return HandlerResult(status, body)
